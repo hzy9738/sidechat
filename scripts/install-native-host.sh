@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST_DIR="$ROOT/host-rs"
-BIN="${HOST_BIN:-$HOST_DIR/target/release/grok-sidechat-host}"
+BIN="${HOST_BIN:-$HOST_DIR/target/release/sidechat-host}"
 # Chrome Web Store 分配的正式 ID（安装器、浏览器策略与白名单统一使用）。
 DEFAULT_EXT_ID="hkifhagmdbdpaihdmllddcingebfpjmm"
 # 本地开发 ID：extension/manifest.json 的 key 固定，加载已解压扩展时使用。

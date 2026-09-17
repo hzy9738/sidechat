@@ -6,16 +6,214 @@
 import { localPathHintFromURL } from "./lib/context.js";
 import { normalizeHostPingResult } from "./lib/host-bridge.js";
 import {
+  DEBUG_CONSOLE_LIMIT,
+  DEBUG_NETWORK_LIMIT,
+  DEBUG_RESPONSE_FETCH_LIMIT,
+  consoleArgumentText,
+  formatDebugSnapshot,
+  isDebugQuestion,
+  pushBounded,
+  sanitizeText,
+  sanitizeUrl,
+} from "./lib/debug-capture.js";
+import {
   PAGE_SCOPE_STORE_KEY,
   derivePageScope,
   readScopeRecord,
   removeScopesForTab,
+  updateScopeRecord,
 } from "./lib/page-scope.js";
 
 const NATIVE_HOST = "com.hzy9738.sidechat";
 const DEFAULT_MODEL = "";
 
 const PENDING_ASK_KEY = "pendingAsk";
+const DEBUG_PROTOCOL_VERSION = "1.3";
+
+/** @type {Map<number, {tabId:number,url:string,startedAt:number,network:any[],console:any[],requests:Map<string, any>}>} */
+const debugCaptures = new Map();
+const debugStatusTimers = new Map();
+
+function debugTarget(tabId) {
+  return { tabId: Number(tabId) };
+}
+
+function debugCaptureStatus(tabId) {
+  const capture = debugCaptures.get(Number(tabId));
+  return {
+    active: !!capture,
+    tabId: Number(tabId) || null,
+    startedAt: capture?.startedAt || null,
+    networkCount: capture?.network.length || 0,
+    consoleCount: capture?.console.length || 0,
+  };
+}
+
+function broadcastDebugStatus(tabId) {
+  broadcastToSidepanels({
+    type: "debug-capture-status",
+    status: debugCaptureStatus(tabId),
+  }, Number(tabId));
+}
+
+function scheduleDebugStatus(tabId) {
+  const id = Number(tabId);
+  if (debugStatusTimers.has(id)) return;
+  debugStatusTimers.set(id, setTimeout(() => {
+    debugStatusTimers.delete(id);
+    broadcastDebugStatus(id);
+  }, 250));
+}
+
+function assertDebuggableTab(tab) {
+  const url = String(tab?.url || "");
+  if (!tab?.id || !/^https?:\/\//i.test(url)) {
+    throw new Error("调试采集仅支持 http/https 网页，Chrome 内置页和扩展页无法采集。");
+  }
+}
+
+async function startDebugCapture(tabId) {
+  if (!chrome.debugger) throw new Error("当前浏览器不支持调试采集。");
+  const tab = await chrome.tabs.get(Number(tabId));
+  assertDebuggableTab(tab);
+  if (debugCaptures.has(tab.id)) return { ok: true, status: debugCaptureStatus(tab.id) };
+
+  const target = debugTarget(tab.id);
+  await chrome.debugger.attach(target, DEBUG_PROTOCOL_VERSION);
+  try {
+    await chrome.debugger.sendCommand(target, "Network.enable", {
+      maxTotalBufferSize: DEBUG_RESPONSE_FETCH_LIMIT * 2,
+      maxResourceBufferSize: DEBUG_RESPONSE_FETCH_LIMIT,
+    });
+    await chrome.debugger.sendCommand(target, "Runtime.enable");
+    await chrome.debugger.sendCommand(target, "Log.enable");
+  } catch (error) {
+    await chrome.debugger.detach(target).catch(() => {});
+    throw error;
+  }
+
+  debugCaptures.set(tab.id, {
+    tabId: tab.id,
+    url: tab.url || "",
+    startedAt: Date.now(),
+    network: [],
+    console: [],
+    requests: new Map(),
+  });
+  broadcastDebugStatus(tab.id);
+  return { ok: true, status: debugCaptureStatus(tab.id) };
+}
+
+async function stopDebugCapture(tabId) {
+  const id = Number(tabId);
+  debugCaptures.delete(id);
+  const timer = debugStatusTimers.get(id);
+  if (timer) clearTimeout(timer);
+  debugStatusTimers.delete(id);
+  if (chrome.debugger) await chrome.debugger.detach(debugTarget(id)).catch(() => {});
+  broadcastDebugStatus(id);
+  return { ok: true, status: debugCaptureStatus(id) };
+}
+
+function addNetworkEntry(capture, params) {
+  const entry = {
+    requestId: String(params.requestId || ""),
+    method: String(params.request?.method || "GET"),
+    url: sanitizeUrl(params.request?.url || ""),
+    type: String(params.type || ""),
+    requestBody: sanitizeText(params.request?.postData || ""),
+    startedAt: Date.now(),
+  };
+  const removed = capture.network.length >= DEBUG_NETWORK_LIMIT ? capture.network[0] : null;
+  pushBounded(capture.network, entry, DEBUG_NETWORK_LIMIT);
+  if (removed && capture.requests.get(removed.requestId) === removed) {
+    capture.requests.delete(removed.requestId);
+  }
+  capture.requests.set(entry.requestId, entry);
+  return entry;
+}
+
+async function captureResponseBody(tabId, capture, entry, encodedDataLength) {
+  if (!entry || !/^(xhr|fetch)$/i.test(entry.type || "")) return;
+  if (!/(?:json|text|javascript|xml|graphql|form)/i.test(entry.mimeType || "")) return;
+  if (Number(encodedDataLength || 0) > DEBUG_RESPONSE_FETCH_LIMIT) {
+    entry.bodyNote = `[omitted: response exceeds ${DEBUG_RESPONSE_FETCH_LIMIT / 1024} KB]`;
+    return;
+  }
+  try {
+    const result = await chrome.debugger.sendCommand(
+      debugTarget(tabId),
+      "Network.getResponseBody",
+      { requestId: entry.requestId }
+    );
+    if (result?.base64Encoded) entry.bodyNote = "[omitted: binary/base64 response]";
+    else entry.responseBody = sanitizeText(result?.body || "");
+  } catch (error) {
+    entry.bodyNote = `[body unavailable: ${sanitizeText(error?.message || error, 300)}]`;
+  }
+  scheduleDebugStatus(tabId);
+}
+
+function addConsoleEntry(capture, entry) {
+  pushBounded(capture.console, entry, DEBUG_CONSOLE_LIMIT);
+}
+
+chrome.debugger?.onEvent?.addListener((source, method, params = {}) => {
+  const tabId = Number(source?.tabId);
+  const capture = debugCaptures.get(tabId);
+  if (!capture) return;
+
+  if (method === "Network.requestWillBeSent") {
+    addNetworkEntry(capture, params);
+  } else if (method === "Network.responseReceived") {
+    const entry = capture.requests.get(String(params.requestId || ""));
+    if (entry) {
+      entry.status = params.response?.status;
+      entry.mimeType = String(params.response?.mimeType || "");
+      entry.url = sanitizeUrl(params.response?.url || entry.url);
+      entry.type = String(params.type || entry.type || "");
+    }
+  } else if (method === "Network.loadingFailed") {
+    const entry = capture.requests.get(String(params.requestId || ""));
+    if (entry) entry.error = sanitizeText(params.errorText || "Request failed", 1_000);
+  } else if (method === "Network.loadingFinished") {
+    const entry = capture.requests.get(String(params.requestId || ""));
+    captureResponseBody(tabId, capture, entry, params.encodedDataLength).catch(() => {});
+  } else if (method === "Runtime.consoleAPICalled") {
+    addConsoleEntry(capture, {
+      level: String(params.type || "log"),
+      text: (params.args || []).map(consoleArgumentText).filter(Boolean).join(" "),
+      url: params.stackTrace?.callFrames?.[0]?.url || "",
+      line: Number(params.stackTrace?.callFrames?.[0]?.lineNumber || 0) + 1,
+    });
+  } else if (method === "Runtime.exceptionThrown") {
+    const details = params.exceptionDetails || {};
+    addConsoleEntry(capture, {
+      level: "exception",
+      text: [details.text, consoleArgumentText(details.exception)].filter(Boolean).join(": "),
+      url: details.url || details.stackTrace?.callFrames?.[0]?.url || "",
+      line: Number(details.lineNumber || 0) + 1,
+    });
+  } else if (method === "Log.entryAdded") {
+    const entry = params.entry || {};
+    addConsoleEntry(capture, {
+      level: String(entry.level || "log"),
+      text: sanitizeText(entry.text || "", 4_000),
+      url: entry.url || "",
+      line: Number(entry.lineNumber || 0),
+    });
+  } else {
+    return;
+  }
+  scheduleDebugStatus(tabId);
+});
+
+chrome.debugger?.onDetach?.addListener((source) => {
+  const tabId = Number(source?.tabId);
+  if (!debugCaptures.has(tabId)) return;
+  debugCaptures.delete(tabId);
+  broadcastDebugStatus(tabId);
+});
 
 function installContextMenus() {
   chrome.contextMenus.removeAll(() => {
@@ -76,7 +274,9 @@ chrome.runtime.onStartup?.addListener?.(installContextMenus);
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "open-side-panel") return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.windowId != null) {
+  if (!tab?.id) return;
+  const opened = await openQuickCard(tab, { kind: "prompt" });
+  if (!opened && tab.windowId != null) {
     await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
   }
 });
@@ -90,13 +290,18 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (id === "chint-ask-selection") {
-    await queueAsk({
+    const context = {
       kind: "selection",
       text: info.selectionText || "",
-      tabId: tab?.id,
-      windowId: tab?.windowId,
-      pageUrl: info.pageUrl || tab?.url || "",
-    });
+    };
+    if (!(await openQuickCard(tab, context))) {
+      await queueAsk({
+        ...context,
+        tabId: tab?.id,
+        windowId: tab?.windowId,
+        pageUrl: info.pageUrl || tab?.url || "",
+      });
+    }
     return;
   }
   if (id === "chint-ask-page") {
@@ -110,28 +315,53 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (id === "chint-ask-link") {
-    await queueAsk({
+    const context = {
       kind: "link",
       text: info.linkUrl || info.selectionText || "",
-      tabId: tab?.id,
-      windowId: tab?.windowId,
-      pageUrl: info.linkUrl || "",
-    });
+      url: info.linkUrl || "",
+    };
+    if (!(await openQuickCard(tab, context))) {
+      await queueAsk({
+        ...context,
+        tabId: tab?.id,
+        windowId: tab?.windowId,
+        pageUrl: info.linkUrl || "",
+      });
+    }
     return;
   }
   if (id === "chint-ask-image") {
     const src = info.srcUrl || "";
-    const dataUrl = await fetchImageDataUrl(src).catch(() => "");
-    await queueAsk({
+    const context = {
       kind: "image",
-      text: "这张图是什么？请结合当前页说明。",
-      tabId: tab?.id,
-      windowId: tab?.windowId,
-      pageUrl: info.pageUrl || tab?.url || "",
-      image: { src, dataUrl, alt: "" },
-    });
+      image: { src, alt: "" },
+    };
+    if (!(await openQuickCard(tab, context))) {
+      const dataUrl = await fetchImageDataUrl(src).catch(() => "");
+      await queueAsk({
+        ...context,
+        text: "请描述这张图片的主要内容。",
+        tabId: tab?.id,
+        windowId: tab?.windowId,
+        pageUrl: info.pageUrl || tab?.url || "",
+        image: { src, dataUrl, alt: "" },
+      });
+    }
   }
 });
+
+async function openQuickCard(tab, context) {
+  if (!tab?.id) return false;
+  try {
+    await chrome.tabs.sendMessage(tab.id, {
+      type: "open-quick-card",
+      context: context || { kind: "prompt" },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** 先写入 session，再开侧栏，避免面板还没连上就丢消息。 */
 async function queueAsk(ask) {
@@ -177,6 +407,9 @@ function notifyActivePage(tab) {
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
+  for (const capturedTabId of [...debugCaptures.keys()]) {
+    if (capturedTabId !== Number(tabId)) stopDebugCapture(capturedTabId).catch(() => {});
+  }
   chrome.tabs.get(tabId).then(notifyActivePage).catch(() => {});
 });
 
@@ -185,6 +418,7 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  debugCaptures.delete(Number(tabId));
   broadcastToSidepanels({ type: "page-tab-removed", tabId });
   chrome.storage.session
     .get(PAGE_SCOPE_STORE_KEY)
@@ -218,8 +452,64 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "debug-capture-status") {
+    sendResponse({ ok: true, status: debugCaptureStatus(msg.tabId) });
+    return false;
+  }
+
+  if (msg?.type === "debug-capture-start") {
+    startDebugCapture(msg.tabId)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg?.type === "debug-capture-stop") {
+    stopDebugCapture(msg.tabId)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
+  if (msg?.type === "debug-capture-snapshot") {
+    const capture = debugCaptures.get(Number(msg.tabId));
+    if (!capture) {
+      sendResponse({ ok: false, error: "当前页尚未开始调试采集。" });
+    } else {
+      sendResponse({
+        ok: true,
+        status: debugCaptureStatus(msg.tabId),
+        snapshot: formatDebugSnapshot(capture),
+      });
+    }
+    return false;
+  }
+
   if (msg?.type === "host-send") {
-    hostSend(msg.payload)
+    const payload = msg.payload || {};
+    if (payload.sessionId && payload.requestId) {
+      broadcastToSidepanels({
+        type: "conversation-turn",
+        requestId: payload.requestId,
+        sessionId: payload.sessionId,
+        text: payload.text || "",
+      }, payload.browser?.tabId);
+    }
+    hostSend(payload)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (msg?.type === "quick-card-send") {
+    sendQuickCardTurn(msg, sender)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (msg?.type === "expand-quick-card") {
+    expandQuickCard(msg, sender)
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
@@ -333,6 +623,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .get(PENDING_ASK_KEY)
       .then((data) => {
         const ask = data[PENDING_ASK_KEY] || null;
+        if (ask?.kind === "card-handoff" && ask.requestId && pending.has(ask.requestId)) {
+          ask.events = pending.get(ask.requestId).events.slice();
+          ask.busy = true;
+        }
         if (ask) chrome.storage.session.remove(PENDING_ASK_KEY).catch(() => {});
         sendResponse({ ok: true, ask });
       })
@@ -349,6 +643,97 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   return false;
 });
+
+async function sendQuickCardTurn(msg, sender) {
+  const tab = sender.tab;
+  if (!tab?.id || tab.windowId == null) throw new Error("无法识别当前网页");
+  const text = String(msg.text || "").trim();
+  if (!text) throw new Error("请输入问题");
+
+  const context = msg.context && typeof msg.context === "object" ? msg.context : null;
+  let image = context?.kind === "image" ? context.image || null : null;
+  if (image?.src && !image.dataUrl) {
+    image = { ...image, dataUrl: await fetchImageDataUrl(image.src).catch(() => "") };
+  }
+
+  const pageScope = derivePageScope(tab.id, tab.url || "");
+  const browser = {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    title: tab.title || "",
+    url: tab.url || "",
+    selection: context?.kind === "selection" ? String(context.text || "") : "",
+    pageText: "",
+    includeTabs: false,
+    tabs: [],
+    mentions: [],
+    images: [],
+    localPathHint: localPathHintFromURL(tab.url || ""),
+  };
+  if (context?.kind === "selection" && context.text) {
+    browser.mentions.push({ kind: "selection", text: String(context.text) });
+  } else if (context?.kind === "image" && image) {
+    browser.mentions.push({ kind: "image", alt: String(image.alt || "选中图片") });
+    browser.images.push({
+      src: String(image.src || ""),
+      dataUrl: String(image.dataUrl || ""),
+      alt: String(image.alt || ""),
+    });
+  } else if (context?.kind === "link" && context.url) {
+    browser.mentions.push({ kind: "page", title: "链接", url: String(context.url) });
+  } else if (context?.kind === "page") {
+    browser.mentions.push({ kind: "page", title: tab.title || "当前页", url: tab.url || "" });
+    if (context.pageText) {
+      browser.pageText = String(context.pageText).slice(0, 20000);
+      browser.mentions.push({ kind: "pageText", text: browser.pageText });
+    }
+  }
+
+  const prefs = await chrome.storage.local.get(["cwd", "apiBase", "apiKey", "apiModel"]);
+  const requestId = String(msg.requestId || `card-${Date.now()}`);
+  const payload = {
+    requestId,
+    pageScope,
+    sessionId: String(msg.sessionId || ""),
+    cwd: prefs.cwd || "",
+    apiBase: prefs.apiBase || "",
+    apiKey: prefs.apiKey || "",
+    model: prefs.apiModel || "",
+    text,
+    browser,
+    reasoningEffort: "high",
+    dryRun: false,
+  };
+  const result = await hostSend(payload);
+  if (result?.sessionId) await bindSessionToScope(pageScope, result.sessionId);
+  return result;
+}
+
+async function bindSessionToScope(scopeKey, sessionId) {
+  if (!scopeKey || !sessionId) return;
+  const data = await chrome.storage.session.get(PAGE_SCOPE_STORE_KEY);
+  const next = updateScopeRecord(data[PAGE_SCOPE_STORE_KEY], scopeKey, {
+    activeSessionId: sessionId,
+  });
+  await chrome.storage.session.set({ [PAGE_SCOPE_STORE_KEY]: next });
+}
+
+async function expandQuickCard(msg, sender) {
+  const tab = sender.tab;
+  if (!tab?.id || tab.windowId == null) throw new Error("无法打开侧栏");
+  const handoff = {
+    ...(msg.handoff && typeof msg.handoff === "object" ? msg.handoff : {}),
+    kind: "card-handoff",
+    tabId: tab.id,
+    windowId: tab.windowId,
+    pageUrl: tab.url || "",
+    createdAt: Date.now(),
+  };
+  await chrome.storage.session.set({ [PENDING_ASK_KEY]: handoff });
+  await chrome.sidePanel.open({ windowId: tab.windowId });
+  broadcastToSidepanels({ type: "pending-ask", ask: handoff });
+  return { ok: true };
+}
 
 async function collectPageContext(tabId, includeTabs, windowId) {
   let tab;
@@ -438,13 +823,26 @@ const disconnectWaiters = new Set();
 /** Side panel long-lived ports for reliable stream delivery (sendMessage can drop). */
 /** @type {Set<chrome.runtime.Port>} */
 const sidepanelPorts = new Set();
+/** @type {Map<chrome.runtime.Port, number>} */
+const quickCardPorts = new Map();
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "sidepanel") return;
-  sidepanelPorts.add(port);
-  port.onDisconnect.addListener(() => {
-    sidepanelPorts.delete(port);
-  });
+  if (port.name === "sidepanel") {
+    sidepanelPorts.add(port);
+    port.onDisconnect.addListener(() => {
+      sidepanelPorts.delete(port);
+      if (sidepanelPorts.size === 0) {
+        for (const tabId of [...debugCaptures.keys()]) stopDebugCapture(tabId).catch(() => {});
+      }
+    });
+    return;
+  }
+  if (port.name === "quick-card" && port.sender?.tab?.id != null) {
+    quickCardPorts.set(port, port.sender.tab.id);
+    port.onDisconnect.addListener(() => {
+      quickCardPorts.delete(port);
+    });
+  }
 });
 
 /**
@@ -452,7 +850,7 @@ chrome.runtime.onConnect.addListener((port) => {
  * Prefer Port only when connected — do NOT also sendMessage (that double-renders
  * every thinking/text delta as "TheThe user user…").
  */
-function broadcastToSidepanels(message) {
+function broadcastToSidepanels(message, tabId = null) {
   let delivered = 0;
   for (const port of [...sidepanelPorts]) {
     try {
@@ -460,6 +858,15 @@ function broadcastToSidepanels(message) {
       delivered++;
     } catch {
       sidepanelPorts.delete(port);
+    }
+  }
+  for (const [port, portTabId] of [...quickCardPorts]) {
+    if (tabId != null && Number(portTabId) !== Number(tabId)) continue;
+    try {
+      port.postMessage(message);
+      delivered++;
+    } catch {
+      quickCardPorts.delete(port);
     }
   }
   // Fallback only when no live Port (e.g. side panel not yet connected).
@@ -530,12 +937,12 @@ function ensureNativePort() {
         requestId: reqId,
         event: msg.event,
         sessionId: msg.sessionId,
-      });
+      }, p.tabId);
     }
     if (msg.op === "send_done" && reqId && pending.has(reqId)) {
       const p = pending.get(reqId);
       p.done = true;
-      p.resolve({
+      const result = {
         ok: !!msg.ok,
         error: msg.error,
         sessionId: msg.sessionId,
@@ -543,15 +950,30 @@ function ensureNativePort() {
         prompt: msg.prompt,
         events: p.events,
         info: msg.info,
-      });
+      };
+      broadcastToSidepanels({
+        type: "host-done",
+        requestId: reqId,
+        ...result,
+      }, p.tabId);
+      p.resolve(result);
       pending.delete(reqId);
     }
     if (msg.op === "cancelled" && reqId) {
-      broadcastToSidepanels({ type: "host-cancelled", requestId: reqId });
+      const p = pending.get(reqId);
+      broadcastToSidepanels({ type: "host-cancelled", requestId: reqId }, p?.tabId);
     }
     if (msg.op === "error" && reqId && pending.has(reqId)) {
       const p = pending.get(reqId);
-      p.reject(new Error(msg.error || "host error"));
+      const error = msg.error || "host error";
+      broadcastToSidepanels({
+        type: "host-done",
+        requestId: reqId,
+        ok: false,
+        error,
+        events: p.events,
+      }, p.tabId);
+      p.reject(new Error(error));
       pending.delete(reqId);
     }
   });
@@ -560,6 +982,13 @@ function ensureNativePort() {
       chrome.runtime.lastError?.message || lastNativeError || "native host disconnected";
     lastNativeError = err;
     for (const [id, p] of pending) {
+      broadcastToSidepanels({
+        type: "host-done",
+        requestId: id,
+        ok: false,
+        error: err,
+        events: p.events,
+      }, p.tabId);
       p.reject(new Error(err));
       pending.delete(id);
     }
@@ -723,10 +1152,24 @@ async function hostSend(payload) {
       const port = ensureNativePort();
       const requestId = payload.requestId || `send-${Date.now()}`;
       const { enableBrowserControl: _ignoredBrowserControl, ...safeBrowser } = browser;
+      const existingMentions = Array.isArray(safeBrowser.mentions)
+        ? safeBrowser.mentions.slice()
+        : [];
+      const hasDebugSnapshot = existingMentions.some((mention) => mention?.kind === "debug");
+      const capture = debugCaptures.get(Number(browser.tabId));
+      if (capture && !hasDebugSnapshot && isDebugQuestion(payload.text || "")) {
+        existingMentions.push({
+          kind: "debug",
+          title: `自动附加调试快照（${capture.network.length} 个请求，${capture.console.length} 条控制台信息）`,
+          text: formatDebugSnapshot(capture),
+        });
+        safeBrowser.mentions = existingMentions;
+      }
       pending.set(requestId, {
         events: [],
         resolve,
         reject,
+        tabId: browser.tabId,
       });
       chrome.storage.local.set({ browserControl: false }).catch(() => {});
       port.postMessage({

@@ -6,6 +6,7 @@ import { renderMarkdown, bindCopyButtons } from "./lib/markdown.js";
 import { packBrowserContext, stripMentionTokens, localPathHintFromURL } from "./lib/context.js";
 import { titleFromUserText } from "./lib/threads.js";
 import { mapHostEventToUI } from "./lib/events.js";
+import { isDebugQuestion } from "./lib/debug-capture.js";
 import {
   PAGE_SCOPE_STORE_KEY,
   DEFAULT_THREAD_TITLE,
@@ -37,6 +38,11 @@ const state = {
   sessions: [],
   sessionQuery: "",
   sessionLoading: false,
+  sessionLoadToken: 0,
+  lastHandoffAt: 0,
+  followOutput: true,
+  drawerReturnFocus: null,
+  speakingButton: null,
   /** 本 turn 是否已通过 live 事件渲染过 thinking/assistant（用于 send_done 补渲染） */
   liveThinkingChars: 0,
   liveAssistantChars: 0,
@@ -45,6 +51,13 @@ const state = {
   mediaRecorder: null,
   mediaStream: null,
   recordingChunks: [],
+  debugCapture: {
+    active: false,
+    tabId: null,
+    startedAt: null,
+    networkCount: 0,
+    consoleCount: 0,
+  },
 };
 
 function hideEmpty() {
@@ -61,25 +74,49 @@ function setHostStatus(ok, title) {
   const el = $("host-dot");
   el.className = `host-dot ${ok === true ? "ok" : ok === false ? "bad" : "unknown"}`;
   el.title = title || (ok ? "host ok" : "host issue");
+  el.setAttribute(
+    "aria-label",
+    ok === true ? "Native host 已连接" : ok === false ? "Native host 未连接" : "Native host 状态未知"
+  );
 }
 
 function setBusy(busy) {
   state.busy = busy;
-  $("btn-send").disabled = busy;
+  if (!busy) finishThinking();
   $("btn-send").hidden = busy;
   $("btn-cancel").disabled = !busy;
   $("btn-cancel").hidden = !busy;
+  $("turn-status").hidden = !busy;
+  $("turn-status").textContent = busy ? "正在生成" : "";
+  $("log").setAttribute("aria-busy", String(busy));
+  updateSendAvailability();
 }
 
-function scrollLog() {
+function updateSendAvailability() {
+  $("btn-send").disabled = state.busy || !$("input").value.trim();
+}
+
+function isLogNearBottom() {
   const log = $("log");
-  log.scrollTop = log.scrollHeight;
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 72;
+}
+
+function updateScrollAffordance() {
+  $("btn-scroll-bottom").hidden = state.followOutput || !$("empty-state")?.hidden;
+}
+
+function scrollLog(force = false) {
+  const log = $("log");
+  if (force) state.followOutput = true;
+  if (state.followOutput) log.scrollTop = log.scrollHeight;
+  updateScrollAffordance();
 }
 
 function autosizeInput() {
   const ta = $("input");
   ta.style.height = "auto";
   ta.style.height = `${Math.min(160, Math.max(24, ta.scrollHeight))}px`;
+  updateSendAvailability();
 }
 
 function renderChips() {
@@ -100,11 +137,14 @@ function renderChips() {
     else if (chip.kind === "pageText") label = "正文";
     else if (chip.kind === "image") label = chip.alt || chip.title || "选中图片";
     else if (chip.kind === "document") label = chip.title || "PDF 文档";
+    else if (chip.kind === "debug") label = chip.title || "Network / Console 快照";
     el.appendChild(document.createTextNode(label));
     const x = document.createElement("button");
     x.type = "button";
     x.className = "x";
     x.textContent = "×";
+    x.title = `移除${label}`;
+    x.setAttribute("aria-label", `移除${label}`);
     x.addEventListener("click", () => {
       state.chips = state.chips.filter((c) => c !== chip);
       renderChips();
@@ -124,11 +164,21 @@ function appendUserBubble(text) {
   bubble.textContent = text;
   wrap.appendChild(bubble);
   log.appendChild(wrap);
-  scrollLog();
+  scrollLog(true);
+}
+
+function finishThinking() {
+  if (!state.thinkingDetails) return;
+  state.thinkingDetails.open = false;
+  const summary = state.thinkingDetails.querySelector("summary");
+  if (summary) summary.textContent = "思考完成";
+  state.thinkingEl = null;
+  state.thinkingDetails = null;
 }
 
 function ensureAssistantBubble() {
   if (state.assistantEl) return state.assistantEl;
+  finishThinking();
   hideEmpty();
   const log = $("log");
   const wrap = document.createElement("div");
@@ -144,13 +194,16 @@ function ensureAssistantBubble() {
   copyBtn.type = "button";
   copyBtn.className = "btn-copy-msg";
   copyBtn.textContent = "复制";
+  copyBtn.title = "复制回复";
+  copyBtn.setAttribute("aria-label", "复制回复");
   copyBtn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(state.assistantRaw || md.innerText || "");
       copyBtn.textContent = "已复制";
       setTimeout(() => (copyBtn.textContent = "复制"), 1000);
     } catch {
-      /* ignore */
+      copyBtn.textContent = "复制失败";
+      setTimeout(() => (copyBtn.textContent = "复制"), 1400);
     }
   });
   actions.appendChild(copyBtn);
@@ -158,12 +211,37 @@ function ensureAssistantBubble() {
   speakBtn.type = "button";
   speakBtn.className = "btn-copy-msg";
   speakBtn.textContent = "朗读";
+  speakBtn.title = "朗读回复";
+  speakBtn.setAttribute("aria-label", "朗读回复");
+  speakBtn.setAttribute("aria-pressed", "false");
   speakBtn.addEventListener("click", () => {
     const text = (md.innerText || state.assistantRaw || "").trim();
     if (!text || !window.speechSynthesis) return;
+    if (state.speakingButton === speakBtn) {
+      window.speechSynthesis.cancel();
+      state.speakingButton = null;
+      speakBtn.textContent = "朗读";
+      speakBtn.setAttribute("aria-pressed", "false");
+      return;
+    }
+    if (state.speakingButton) {
+      state.speakingButton.textContent = "朗读";
+      state.speakingButton.setAttribute("aria-pressed", "false");
+    }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "zh-CN";
+    const resetSpeakButton = () => {
+      if (state.speakingButton !== speakBtn) return;
+      state.speakingButton = null;
+      speakBtn.textContent = "朗读";
+      speakBtn.setAttribute("aria-pressed", "false");
+    };
+    utterance.addEventListener("end", resetSpeakButton, { once: true });
+    utterance.addEventListener("error", resetSpeakButton, { once: true });
+    state.speakingButton = speakBtn;
+    speakBtn.textContent = "停止朗读";
+    speakBtn.setAttribute("aria-pressed", "true");
     window.speechSynthesis.speak(utterance);
   });
   actions.appendChild(speakBtn);
@@ -195,7 +273,7 @@ function appendThinking(text) {
     // 默认展开，方便看到思考过程（可点标题折叠）
     details.open = true;
     const summary = document.createElement("summary");
-    summary.textContent = "思考过程";
+    summary.textContent = "正在思考…";
     const body = document.createElement("div");
     body.className = "thinking-body";
     details.appendChild(summary);
@@ -214,6 +292,11 @@ function appendThinking(text) {
 function appendError(text) {
   hideEmpty();
   const log = $("log");
+  const last = log.lastElementChild;
+  if (last?.classList?.contains("err-banner") && last.textContent === text) {
+    scrollLog();
+    return;
+  }
   const div = document.createElement("div");
   div.className = "err-banner";
   div.textContent = text;
@@ -264,7 +347,9 @@ function persistScopePatch(patch, expectedScope = state.scopeKey) {
 function closePopovers() {
   $("settings-panel").hidden = true;
   $("attach-menu").hidden = true;
-  $("mention-popup").hidden = true;
+  setMentionPopupOpen(false);
+  $("btn-settings").setAttribute("aria-expanded", "false");
+  $("btn-attach").setAttribute("aria-expanded", "false");
 }
 
 function isDrySessionId(id) {
@@ -323,13 +408,39 @@ function onBackgroundMessage(msg) {
     if (msg.event) handleHostEvent(msg.event);
     return;
   }
+  if (msg.type === "host-done") {
+    if (!state.requestId || msg.requestId !== state.requestId) return;
+    if (msg.sessionId) applySessionId(msg.sessionId);
+    replayEventsIfNeeded(msg.events || []);
+    if (msg.error) appendError(msg.error);
+    state.requestId = "";
+    setBusy(false);
+    state.assistantEl = null;
+    return;
+  }
+  if (msg.type === "host-cancelled") {
+    if (!state.requestId || msg.requestId !== state.requestId) return;
+    state.requestId = "";
+    setBusy(false);
+    state.assistantEl = null;
+    return;
+  }
   if (msg.type === "host-status") {
     setHostStatus(true, `host ${msg.msg?.version || "ok"}`);
     return;
   }
   if (msg.type === "active-page-changed" && msg.page) {
     if (state.windowId != null && msg.page.windowId !== state.windowId) return;
-    queuePageActivation(msg.page);
+    queuePageActivation(msg.page).then(() => refreshDebugCapture(msg.page.tabId)).catch(() => {});
+    return;
+  }
+  if (msg.type === "debug-capture-status" && msg.status) {
+    if (
+      state.lastPage?.tabId != null &&
+      Number(msg.status.tabId) !== Number(state.lastPage.tabId)
+    ) return;
+    state.debugCapture = msg.status;
+    renderDebugCaptureControls();
     return;
   }
   if (msg.type === "page-tab-removed") {
@@ -354,6 +465,10 @@ function onBackgroundMessage(msg) {
 /** 消费右键 / 划词带来的待问内容。 */
 async function applyPendingAsk(ask) {
   if (!ask || typeof ask !== "object") return;
+  if (ask.kind === "card-handoff") {
+    await applyCardHandoff(ask);
+    return;
+  }
   const page = await collectPage(ask.tabId);
   if (state.windowId != null && page?.windowId != null && page.windowId !== state.windowId) return;
   if (page) await queuePageActivation(page);
@@ -382,6 +497,102 @@ async function applyPendingAsk(ask) {
   }
   autosizeInput();
   input?.focus();
+}
+
+function contextToChip(context) {
+  if (!context || typeof context !== "object") return null;
+  if (context.kind === "selection" && context.text) {
+    return { kind: "selection", text: context.text };
+  }
+  if (context.kind === "image" && context.image) {
+    return {
+      kind: "image",
+      src: context.image.src || "",
+      dataUrl: context.image.dataUrl || "",
+      alt: context.image.alt || "选中图片",
+      title: "选中图片",
+    };
+  }
+  if (context.kind === "page") {
+    return context.pageText
+      ? { kind: "pageText", text: context.pageText, title: context.title || "当前页" }
+      : { kind: "page", title: context.title || "当前页", url: context.url || "" };
+  }
+  if (context.kind === "link" && context.url) {
+    return { kind: "page", title: "链接", url: context.url };
+  }
+  return null;
+}
+
+function assistantTextFromEvents(events) {
+  let text = "";
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.type === "text") text += event.text || "";
+    else if (
+      event?.type === "partial" &&
+      !/thinking|host\.argv|stderr/i.test(String(event.rawType || ""))
+    ) {
+      text += event.text || "";
+    }
+  }
+  return text;
+}
+
+/** Hydrate the side panel from the same quick-card turn without resending it. */
+async function applyCardHandoff(ask) {
+  if (ask.createdAt && ask.createdAt <= state.lastHandoffAt) return;
+  state.lastHandoffAt = Number(ask.createdAt || Date.now());
+  const page = await collectPage(ask.tabId);
+  if (state.windowId != null && page?.windowId != null && page.windowId !== state.windowId) return;
+  if (page) await queuePageActivation(page);
+
+  const messages = Array.isArray(ask.messages)
+    ? ask.messages.map((message) => ({
+        role: message?.role === "assistant" ? "assistant" : "user",
+        text: String(message?.text || ""),
+      }))
+    : [];
+  const eventText = assistantTextFromEvents(ask.events);
+  const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  if (eventText && (!lastAssistant || eventText.length > lastAssistant.text.length)) {
+    if (lastAssistant) lastAssistant.text = eventText;
+    else messages.push({ role: "assistant", text: eventText });
+  }
+
+  const log = $("log");
+  log.innerHTML = messages.length ? "" : `<div id="empty-state" class="empty">${emptyStateHTML()}</div>`;
+  state.assistantEl = null;
+  state.assistantRaw = "";
+  state.thinkingEl = null;
+  state.thinkingDetails = null;
+  state.liveThinkingChars = 0;
+  state.liveAssistantChars = 0;
+  for (const message of messages) {
+    if (message.role === "user") {
+      appendUserBubble(message.text);
+      state.assistantEl = null;
+      state.assistantRaw = "";
+    } else {
+      state.assistantEl = null;
+      state.assistantRaw = "";
+      updateAssistantMarkdown(message.text, false);
+      state.liveAssistantChars = message.text.length;
+    }
+  }
+
+  const chip = contextToChip(ask.context);
+  state.chips = chip ? [chip] : [];
+  renderChips();
+  if (ask.sessionId) applySessionId(ask.sessionId);
+  const input = $("input");
+  input.value = String(ask.draft || "");
+  autosizeInput();
+
+  state.requestId = ask.busy && ask.requestId ? String(ask.requestId) : "";
+  setBusy(!!state.requestId);
+  if (!state.requestId) state.assistantEl = null;
+  scrollLog(true);
+  input.focus();
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -625,27 +836,128 @@ async function addChipFromKind(kind) {
   }
 }
 
+function renderDebugCaptureControls() {
+  const status = state.debugCapture || {};
+  const toggle = $("btn-debug-toggle");
+  const snapshot = $("btn-debug-snapshot");
+  const note = $("debug-capture-note");
+  if (!toggle || !snapshot || !note) return;
+  toggle.dataset.active = String(!!status.active);
+  toggle.textContent = status.active
+    ? "停止采集 Network / Console"
+    : "开始采集 Network / Console";
+  snapshot.hidden = !status.active;
+  note.textContent = status.active
+    ? `正在采集：${status.networkCount || 0} 个请求，${status.consoleCount || 0} 条控制台信息。`
+    : "开始后刷新页面或复现问题。";
+}
+
+async function refreshDebugCapture(tabId = state.lastPage?.tabId) {
+  if (tabId == null) return;
+  const response = await chrome.runtime.sendMessage({ type: "debug-capture-status", tabId });
+  if (response?.ok && response.status) {
+    state.debugCapture = response.status;
+    renderDebugCaptureControls();
+  }
+}
+
+async function toggleDebugCapture() {
+  let tabId = state.lastPage?.tabId;
+  if (state.debugCapture?.active && tabId != null && Number(state.debugCapture.tabId) === Number(tabId)) {
+    const response = await chrome.runtime.sendMessage({ type: "debug-capture-stop", tabId });
+    if (!response?.ok) throw new Error(response?.error || "停止调试采集失败");
+    state.debugCapture = response.status;
+    renderDebugCaptureControls();
+    setMediaStatus("调试采集已停止");
+    return;
+  }
+
+  if (tabId == null) {
+    await collectPage();
+    tabId = state.lastPage?.tabId;
+  }
+  if (tabId == null) throw new Error("无法确定当前标签页。");
+  const response = await chrome.runtime.sendMessage({ type: "debug-capture-start", tabId });
+  if (!response?.ok) throw new Error(response?.error || "启动调试采集失败");
+  state.debugCapture = response.status;
+  renderDebugCaptureControls();
+  setMediaStatus("采集已开始，请刷新页面或复现问题");
+}
+
+async function attachDebugSnapshot() {
+  const tabId = state.lastPage?.tabId;
+  if (tabId == null) throw new Error("无法确定当前标签页。");
+  const response = await chrome.runtime.sendMessage({ type: "debug-capture-snapshot", tabId });
+  if (!response?.ok) throw new Error(response?.error || "读取调试快照失败");
+  state.chips = state.chips.filter((chip) => chip.kind !== "debug");
+  addChip({
+    kind: "debug",
+    title: `调试快照 ${response.status?.networkCount || 0}/${response.status?.consoleCount || 0}`,
+    text: response.snapshot || "",
+  });
+  const input = $("input");
+  if (!input.value.trim()) input.value = "请分析附带的 Network 和 Console 快照，定位问题并给出修复建议。";
+  autosizeInput();
+  closePopovers();
+  input.focus();
+  setMediaStatus("调试快照已附加");
+}
+
 // Attach / settings — floating popovers, never stay in document flow
 $("btn-attach").addEventListener("click", (e) => {
   e.stopPropagation();
+  const willOpen = $("attach-menu").hidden;
   $("settings-panel").hidden = true;
-  $("attach-menu").hidden = !$("attach-menu").hidden;
+  $("btn-settings").setAttribute("aria-expanded", "false");
+  $("attach-menu").hidden = !willOpen;
+  $("btn-attach").setAttribute("aria-expanded", String(willOpen));
+  if (willOpen) refreshDebugCapture().catch(() => {});
+  if (willOpen) requestAnimationFrame(() => $("attach-menu").querySelector("button")?.focus());
 });
 document.querySelectorAll("[data-add-chip]").forEach((btn) => {
   btn.addEventListener("click", () => {
     addChipFromKind(btn.getAttribute("data-add-chip"));
     $("attach-menu").hidden = true;
+    $("btn-attach").setAttribute("aria-expanded", "false");
+    $("input").focus();
   });
+});
+
+$("btn-debug-toggle")?.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  try {
+    await toggleDebugCapture();
+  } catch (error) {
+    appendError(String(error?.message || error));
+  }
+});
+
+$("btn-debug-snapshot")?.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  try {
+    await attachDebugSnapshot();
+  } catch (error) {
+    appendError(String(error?.message || error));
+  }
 });
 
 $("btn-settings").addEventListener("click", (e) => {
   e.stopPropagation();
+  const willOpen = $("settings-panel").hidden;
   $("attach-menu").hidden = true;
-  $("settings-panel").hidden = !$("settings-panel").hidden;
+  $("btn-attach").setAttribute("aria-expanded", "false");
+  $("settings-panel").hidden = !willOpen;
+  $("btn-settings").setAttribute("aria-expanded", String(willOpen));
+  if (willOpen) {
+    refreshSelectionSiteButton().catch(() => {});
+    requestAnimationFrame(() => $("api-base")?.focus());
+  }
 });
 $("btn-close-settings")?.addEventListener("click", (e) => {
   e.stopPropagation();
   $("settings-panel").hidden = true;
+  $("btn-settings").setAttribute("aria-expanded", "false");
+  $("btn-settings").focus();
 });
 
 // 点页面任意处关闭浮层（浮层内部 stopPropagation）
@@ -669,6 +981,12 @@ const MENTION_ITEMS = [
   { kind: "pageText", label: "页面正文", desc: "摘录" },
 ];
 
+function setMentionPopupOpen(open) {
+  $("mention-popup").hidden = !open;
+  $("input").setAttribute("aria-expanded", String(open));
+  if (!open) $("input").removeAttribute("aria-activedescendant");
+}
+
 function updateMentionPopup() {
   const input = $("input");
   const popup = $("mention-popup");
@@ -677,7 +995,7 @@ function updateMentionPopup() {
   const before = val.slice(0, caret);
   const at = before.match(/(?:^|\s)@([\w-]*)$/);
   if (!at) {
-    popup.hidden = true;
+    setMentionPopupOpen(false);
     popup.innerHTML = "";
     return;
   }
@@ -686,19 +1004,37 @@ function updateMentionPopup() {
     (i) => !q || i.kind.startsWith(q) || i.label.includes(q)
   );
   if (!items.length) {
-    popup.hidden = true;
+    setMentionPopupOpen(false);
     return;
   }
-  popup.hidden = false;
   popup.innerHTML = "";
   items.forEach((item, idx) => {
     const b = document.createElement("button");
     b.type = "button";
+    b.id = `mention-option-${idx}`;
     b.className = `mention-item${idx === 0 ? " active" : ""}`;
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(idx === 0));
     b.innerHTML = `<strong>${item.label}</strong><div class="muted">${item.desc}</div>`;
     b.addEventListener("click", () => applyMention(item.kind));
     popup.appendChild(b);
   });
+  setMentionPopupOpen(true);
+  $("input").setAttribute("aria-activedescendant", "mention-option-0");
+}
+
+function moveMentionSelection(delta) {
+  const items = [...$("mention-popup").querySelectorAll(".mention-item")];
+  if (!items.length) return;
+  const current = Math.max(0, items.findIndex((item) => item.classList.contains("active")));
+  const next = (current + delta + items.length) % items.length;
+  items.forEach((item, index) => {
+    const active = index === next;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  });
+  $("input").setAttribute("aria-activedescendant", items[next].id);
+  items[next].scrollIntoView({ block: "nearest" });
 }
 
 function applyMention(kind) {
@@ -713,21 +1049,30 @@ function applyMention(kind) {
     return `${lead}${token} `;
   });
   input.value = replaced + after;
-  $("mention-popup").hidden = true;
+  setMentionPopupOpen(false);
   addChipFromKind(kind === "pageText" ? "pageText" : kind);
   input.focus();
   autosizeInput();
 }
 
 $("input").addEventListener("focus", () => {
-  $("settings-panel").hidden = true;
-  $("attach-menu").hidden = true;
+  closePopovers();
 });
 $("input").addEventListener("input", () => {
   updateMentionPopup();
   autosizeInput();
 });
 $("input").addEventListener("keydown", (e) => {
+  if (!$("mention-popup").hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+    e.preventDefault();
+    moveMentionSelection(e.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (!$("mention-popup").hidden && e.key === "Escape") {
+    e.preventDefault();
+    setMentionPopupOpen(false);
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     if (!$("mention-popup").hidden) {
@@ -762,6 +1107,8 @@ function clearFeed() {
   state.thinkingEl = null;
   state.thinkingDetails = null;
   state.assistantRaw = "";
+  state.followOutput = true;
+  updateScrollAffordance();
 }
 
 let scopeActivationQueue = Promise.resolve();
@@ -845,6 +1192,7 @@ function shortCwd(cwd) {
 }
 
 async function loadSessions(query) {
+  const loadToken = ++state.sessionLoadToken;
   state.sessionLoading = true;
   const status = $("session-list-status");
   if (status) status.textContent = "加载会话…";
@@ -854,6 +1202,7 @@ async function loadSessions(query) {
       query: query || "",
       limit: 200,
     });
+    if (loadToken !== state.sessionLoadToken) return;
     if (!res?.ok) {
       state.sessions = [];
       if (status) status.textContent = res?.error || "无法加载会话（检查 native host）";
@@ -868,11 +1217,12 @@ async function loadSessions(query) {
     }
     renderSessionList();
   } catch (e) {
+    if (loadToken !== state.sessionLoadToken) return;
     state.sessions = [];
     if (status) status.textContent = String(e?.message || e);
     renderSessionList();
   } finally {
-    state.sessionLoading = false;
+    if (loadToken === state.sessionLoadToken) state.sessionLoading = false;
   }
 }
 
@@ -886,6 +1236,7 @@ function renderSessionList() {
     btn.type = "button";
     const active = s.id && s.id === state.sessionId;
     btn.className = `thread-item${active ? " active" : ""}`;
+    if (active) btn.setAttribute("aria-current", "page");
     const title = s.title || s.summary || "（无标题）";
     const time = formatSessionTime(s.updatedAt);
     const cwd = shortCwd(s.cwd);
@@ -958,7 +1309,10 @@ async function selectSession(sessionId, options = {}) {
       }
     }
     renderSessionList();
-    if (options.closeAfter !== false) closeDrawer();
+    if (options.closeAfter !== false) {
+      closeDrawer();
+      $("input").focus();
+    }
   } catch (e) {
     if (state.scopeKey === expectedScope) appendError(String(e));
   }
@@ -983,16 +1337,34 @@ function newThread() {
   clearFeed();
   renderSessionList();
   closeDrawer();
+  $("input").focus();
 }
 
 function openDrawer() {
+  state.drawerReturnFocus = document.activeElement;
+  document.querySelector(".shell").inert = true;
   $("thread-drawer").hidden = false;
   $("drawer-scrim").hidden = false;
+  $("btn-threads").setAttribute("aria-expanded", "true");
   loadSessions(state.sessionQuery || $("session-search")?.value || "");
+  requestAnimationFrame(() => {
+    $("session-search")?.focus();
+    $("session-search")?.select();
+  });
 }
-function closeDrawer() {
+function closeDrawer(restoreFocus = false) {
   $("thread-drawer").hidden = true;
   $("drawer-scrim").hidden = true;
+  document.querySelector(".shell").inert = false;
+  $("btn-threads").setAttribute("aria-expanded", "false");
+  if (restoreFocus) {
+    const target = state.drawerReturnFocus;
+    requestAnimationFrame(() => {
+      if (target instanceof HTMLElement && target.isConnected) target.focus();
+      else $("btn-threads").focus();
+    });
+  }
+  state.drawerReturnFocus = null;
 }
 
 async function initializePageScope() {
@@ -1013,10 +1385,53 @@ $("btn-new").addEventListener("click", newThread);
 $("btn-new-thread-drawer").addEventListener("click", newThread);
 $("btn-threads").addEventListener("click", () => {
   if ($("thread-drawer").hidden) openDrawer();
-  else closeDrawer();
+  else closeDrawer(true);
 });
-$("btn-close-threads").addEventListener("click", closeDrawer);
-$("drawer-scrim").addEventListener("click", closeDrawer);
+$("btn-close-threads").addEventListener("click", () => closeDrawer(true));
+$("drawer-scrim").addEventListener("click", () => closeDrawer(true));
+$("log").addEventListener("scroll", () => {
+  state.followOutput = isLogNearBottom();
+  updateScrollAffordance();
+}, { passive: true });
+$("btn-scroll-bottom").addEventListener("click", () => scrollLog(true));
+
+document.addEventListener("keydown", (event) => {
+  const drawer = $("thread-drawer");
+  if (event.key === "Escape") {
+    if (!drawer.hidden) {
+      event.preventDefault();
+      closeDrawer(true);
+      return;
+    }
+    if (!$("settings-panel").hidden) {
+      event.preventDefault();
+      closePopovers();
+      $("btn-settings").focus();
+      return;
+    }
+    if (!$("attach-menu").hidden) {
+      event.preventDefault();
+      closePopovers();
+      $("btn-attach").focus();
+    }
+    return;
+  }
+  if (event.key !== "Tab" || drawer.hidden) return;
+  const focusable = [...drawer.querySelectorAll("button:not(:disabled), input:not(:disabled)")];
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!drawer.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 // 历史搜索（防抖）
 let searchTimer = 0;
 $("session-search")?.addEventListener("input", () => {
@@ -1027,10 +1442,16 @@ $("session-search")?.addEventListener("input", () => {
 });
 
 $("btn-cancel").addEventListener("click", async () => {
+  $("btn-cancel").disabled = true;
+  $("turn-status").textContent = "正在停止…";
   try {
     await chrome.runtime.sendMessage({ type: "host-cancel", requestId: state.requestId });
   } catch (e) {
     appendError(String(e));
+    if (state.busy) {
+      $("btn-cancel").disabled = false;
+      $("turn-status").textContent = "正在生成";
+    }
   }
 });
 
@@ -1059,6 +1480,27 @@ $("btn-send").addEventListener("click", async () => {
   if (!turnScope) {
     appendError("当前页面没有可用的隔离作用域。");
     return;
+  }
+
+  const hasDebugChip = state.chips.some((chip) => chip.kind === "debug");
+  if (isDebugQuestion(raw) && !hasDebugChip) {
+    try {
+      await refreshDebugCapture(page.tabId);
+    } catch {
+      // 后台状态读取失败时继续走普通对话，不在这里制造额外阻断。
+    }
+    if (!state.debugCapture?.active) {
+      appendError("当前页还没有开启调试采集。请点输入框左下角 ＠ → 开始采集 Network / Console，然后刷新页面或复现问题。");
+      $("settings-panel").hidden = true;
+      $("attach-menu").hidden = false;
+      $("btn-attach").setAttribute("aria-expanded", "true");
+      $("btn-debug-toggle")?.focus();
+      return;
+    }
+    if (!(state.debugCapture.networkCount || state.debugCapture.consoleCount)) {
+      appendError("调试采集已经开启，但还没有记录到请求或控制台信息。请刷新页面或复现问题后再发送。");
+      return;
+    }
   }
 
   // 页面作用域确认后再快照 session/chip，禁止沿用上一网页的状态。
@@ -1178,7 +1620,15 @@ $("btn-send").addEventListener("click", async () => {
 });
 
 // Prefs — 附带正文默认开；dry-run 默认关。迁移时关闭旧版浏览器工具开关。
-chrome.storage.local.get(["cwd", "attachBody", "dryRun", "apiBase", "apiKey", "apiModel"]).then((data) => {
+chrome.storage.local.get([
+  "cwd",
+  "attachBody",
+  "dryRun",
+  "apiBase",
+  "apiKey",
+  "apiModel",
+  "selectionChipEnabled",
+]).then((data) => {
   if (data.cwd) $("cwd").value = data.cwd;
   if (data.apiBase) $("api-base").value = data.apiBase;
   if (data.apiKey) $("api-key").value = data.apiKey;
@@ -1187,8 +1637,9 @@ chrome.storage.local.get(["cwd", "attachBody", "dryRun", "apiBase", "apiKey", "a
   if (typeof data.attachBody === "boolean") {
     $("attach-body").checked = data.attachBody;
   } else {
-    $("attach-body").checked = true;
+    $("attach-body").checked = false;
   }
+  $("selection-chip-enabled").checked = data.selectionChipEnabled !== false;
   chrome.storage.local.set({ browserControl: false }).catch(() => {});
 });
 function persistPrefs() {
@@ -1198,18 +1649,67 @@ function persistPrefs() {
     apiKey: $("api-key")?.value || "",
     apiModel: $("api-model")?.value || "",
     attachBody: $("attach-body").checked,
+    selectionChipEnabled: $("selection-chip-enabled").checked,
     dryRun: $("dry-run").checked,
   });
 }
-["cwd", "dry-run", "attach-body", "api-base", "api-key", "api-model"].forEach((id) => {
+[
+  "cwd",
+  "dry-run",
+  "attach-body",
+  "selection-chip-enabled",
+  "api-base",
+  "api-key",
+  "api-model",
+].forEach((id) => {
   const el = $(id);
   if (!el) return;
   el.addEventListener("change", persistPrefs);
 });
 
+function currentSiteOrigin() {
+  try {
+    return new URL(state.lastPage?.url || "").origin;
+  } catch {
+    return "";
+  }
+}
+
+async function refreshSelectionSiteButton() {
+  const button = $("btn-toggle-selection-site");
+  const origin = currentSiteOrigin();
+  if (!origin || !/^https?:/i.test(origin)) {
+    button.disabled = true;
+    button.textContent = "当前页面不支持网站级设置";
+    return;
+  }
+  const data = await chrome.storage.local.get("selectionChipDisabledSites");
+  const sites = Array.isArray(data.selectionChipDisabledSites) ? data.selectionChipDisabledSites : [];
+  const disabled = sites.includes(origin);
+  button.disabled = false;
+  button.textContent = disabled ? "在此网站启用划词胶囊" : "在此网站停用划词胶囊";
+  button.setAttribute("aria-pressed", String(disabled));
+}
+
+$("btn-toggle-selection-site").addEventListener("click", async () => {
+  const origin = currentSiteOrigin();
+  if (!origin) return;
+  const data = await chrome.storage.local.get("selectionChipDisabledSites");
+  const sites = new Set(
+    Array.isArray(data.selectionChipDisabledSites) ? data.selectionChipDisabledSites : []
+  );
+  if (sites.has(origin)) sites.delete(origin);
+  else sites.add(origin);
+  await chrome.storage.local.set({ selectionChipDisabledSites: [...sites] });
+  await refreshSelectionSiteButton();
+});
+
 // Init
 renderChips();
-initializePageScope().catch((error) => appendError(String(error)));
+renderDebugCaptureControls();
+initializePageScope()
+  .then(() => refreshDebugCapture())
+  .catch((error) => appendError(String(error)));
 autosizeInput();
 chrome.runtime
   .sendMessage({ type: "host-ping" })

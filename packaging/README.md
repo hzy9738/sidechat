@@ -36,6 +36,8 @@ macOS 与 Windows 打包脚本会自动把它复制为 `anneng-config.json`，�
 
 注意：`anneng-config.json` 会随安装包下发到用户机器，具备本机读取权限的人可以查看它；这里防的是密钥进入公开仓库，不是防本机逆向。轮换密钥只需更新 `.secrets/host-config.json` 后重新打包。
 
+安全目标（已接受的风险）：共享密钥 + 无后端 + 装完即用，三者叠加下不存在「不可提取」的方案——Host 发送请求时必须能取到原始密钥，因此本方案只防明文泄露和低成本提取，**不保证抵抗有经验的本机攻击者**。限制提取后损失依赖客户端之外的手段：网关侧用量上限与异常告警、定期轮换（建议每次发版换 key，本仓库换 key 只需更新 `.secrets/host-config.json` 重新打包）、必要时按部门/批次拆分密钥以便单独吊销、出口 IP 白名单（会切断居家/外网使用，需权衡）。
+
 CI 构建从仓库 Secret `HOST_CONFIG_JSON` 注入同样内容（Settings → Secrets and variables → Actions），未配置时产出不含默认配置的安装包。
 
 ## macOS

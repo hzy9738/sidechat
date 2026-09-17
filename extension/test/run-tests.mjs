@@ -3,6 +3,7 @@
  * Run: node extension/test/run-tests.mjs
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ const threads = await import(pathToFileURL(path.join(lib, "threads.js")).href);
 const markdown = await import(pathToFileURL(path.join(lib, "markdown.js")).href);
 const hostBridge = await import(pathToFileURL(path.join(lib, "host-bridge.js")).href);
 const pageScope = await import(pathToFileURL(path.join(lib, "page-scope.js")).href);
+const debugCapture = await import(pathToFileURL(path.join(lib, "debug-capture.js")).href);
 
 let failed = 0;
 function test(name, fn) {
@@ -66,6 +68,36 @@ test("packBrowserContext keeps extracted PDF text as a document mention", () => 
   const document = packed.mentions.find((item) => item.kind === "document");
   assert.equal(document.title, "方案.pdf");
   assert.match(document.text, /项目背景/);
+});
+
+test("debug snapshot redacts credentials and keeps useful API data", () => {
+  const snapshot = debugCapture.formatDebugSnapshot({
+    url: "https://example.test/app?token=secret-token&view=main",
+    startedAt: 1,
+    network: [{
+      method: "POST",
+      url: "https://example.test/api/items?api_key=top-secret",
+      type: "Fetch",
+      status: 200,
+      mimeType: "application/json",
+      requestBody: JSON.stringify({ name: "demo", password: "dont-show" }),
+      responseBody: JSON.stringify({ data: [1, 2], access_token: "dont-show-either" }),
+    }],
+    console: [{ level: "error", text: "Authorization: Bearer abc.def", url: "https://example.test/app.js", line: 9 }],
+  });
+  assert.match(snapshot, /POST .*\/api\/items/);
+  assert.match(snapshot, /\"name\":\"demo\"/);
+  assert.match(snapshot, /\[redacted\]/);
+  assert.equal(snapshot.includes("dont-show"), false);
+  assert.equal(snapshot.includes("secret-token"), false);
+  assert.equal(snapshot.includes("top-secret"), false);
+  assert.equal(snapshot.includes("abc.def"), false);
+});
+
+test("debug questions are detected without treating ordinary questions as debug work", () => {
+  assert.equal(debugCapture.isDebugQuestion("你可以拿到这页面的接口和数据吗"), true);
+  assert.equal(debugCapture.isDebugQuestion("分析一下 Network 和 Console"), true);
+  assert.equal(debugCapture.isDebugQuestion("这段文字是什么意思"), false);
 });
 
 test("packBrowserContext contains page context but no tool toggle or cwd", () => {
@@ -227,6 +259,40 @@ test("UI and background force tool-free mode", async () => {
   assert.ok(bg.includes("normalizeHostPingResult"));
   // timeout must not resolve ok:true
   assert.equal(bg.includes('ok: true,\n          note: "ping sent'), false);
+});
+
+test("sidepanel exposes keyboard and streaming interaction affordances", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "sidepanel.html"), "utf8");
+  const js = fs.readFileSync(path.join(__dirname, "..", "sidepanel.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "sidepanel.css"), "utf8");
+  assert.ok(html.includes('aria-modal="true"'));
+  assert.ok(html.includes('id="btn-scroll-bottom"'));
+  assert.ok(html.includes('aria-describedby="composer-hint"'));
+  assert.ok(js.includes('state.followOutput = isLogNearBottom()'));
+  assert.ok(js.includes('e.key === "ArrowDown" || e.key === "ArrowUp"'));
+  assert.ok(js.includes("finishThinking()"));
+  assert.ok(html.includes('id="btn-debug-toggle"'));
+  assert.ok(html.includes('id="btn-debug-snapshot"'));
+  assert.equal(js.includes('permissions.request({ permissions: ["debugger"] })'), false);
+  assert.ok(css.includes("prefers-reduced-motion: reduce"));
+});
+
+test("quick card supports optional context and lossless side-panel handoff", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
+  const quick = fs.readFileSync(path.join(__dirname, "..", "quick-card.js"), "utf8");
+  const content = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
+  assert.ok(manifest.permissions.includes("debugger"));
+  assert.equal(Object.prototype.hasOwnProperty.call(manifest, "optional_permissions"), false);
+  assert.ok(manifest.content_scripts[0].js.includes("quick-card.js"));
+  assert.ok(quick.includes('data-action="explain"'));
+  assert.ok(quick.includes('data-action="translate"'));
+  assert.ok(quick.includes('addQuickButton("ocr"'));
+  assert.ok(quick.includes('type: "expand-quick-card"'));
+  assert.ok(quick.includes("sessionId: state.sessionId"));
+  assert.ok(quick.includes("requestId: state.requestId"));
+  assert.ok(quick.includes("messages: state.messages.map"));
+  assert.ok(quick.includes("draft: input.value"));
+  assert.equal(content.includes('"contextmenu"'), false);
 });
 
 if (failed) {
