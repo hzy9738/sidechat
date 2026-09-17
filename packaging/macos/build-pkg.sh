@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-VERSION="${APP_VERSION:-0.6.3}"
+VERSION="${APP_VERSION:-$(/usr/bin/sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "$ROOT/extension/manifest.json" | /usr/bin/head -1)}"
 EXTENSION_ID="${EXTENSION_ID:-hkifhagmdbdpaihdmllddcingebfpjmm}"
 UPDATE_URL="${EXTENSION_UPDATE_URL:-https://clients2.google.com/service/update2/crx}"
-HOST_SOURCE="${HOST_BINARY:-$ROOT/host-rs/target/release/grok-sidechat-host}"
+HOST_SOURCE="${HOST_BINARY:-$ROOT/host-rs/target/release/sidechat-host}"
 HOST_CONFIG="${ANNENG_HOST_CONFIG:-$ROOT/.secrets/host-config.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/anneng-pkg.XXXXXX")"

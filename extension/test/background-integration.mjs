@@ -27,6 +27,7 @@ const activeTab = {
   url: "https://example.test/page",
 };
 let scriptExecutions = 0;
+let reloadCalls = 0;
 
 const eventTarget = () => ({
   addListener(listener) { this.listener = listener; },
@@ -64,6 +65,34 @@ globalThis.chrome = {
     async query(query) { return query?.active ? [activeTab] : [activeTab]; },
     async get(tabId) { return tabId === activeTab.id ? activeTab : null; },
     async sendMessage() { return { ok: true }; },
+    async reload(tabId) {
+      reloadCalls++;
+      setTimeout(() => {
+        for (const listener of debuggerEventListeners) {
+          listener({ tabId }, "Network.requestWillBeSent", {
+            requestId: "prepared-request",
+            type: "Fetch",
+            request: { method: "GET", url: "https://example.test/api/prepared" },
+          });
+          listener({ tabId }, "Network.responseReceived", {
+            requestId: "prepared-request",
+            type: "Fetch",
+            response: { status: 200, mimeType: "application/json", url: "https://example.test/api/prepared" },
+          });
+          listener({ tabId }, "Network.loadingFinished", {
+            requestId: "prepared-request",
+            encodedDataLength: 100,
+          });
+          listener({ tabId }, "Runtime.consoleAPICalled", {
+            type: "log",
+            args: [{ value: "prepared-console" }],
+          });
+        }
+        for (const listener of [...tabUpdatedListeners]) {
+          listener(tabId, { status: "complete" }, activeTab);
+        }
+      }, 0);
+    },
     onActivated: { addListener(listener) { tabActivatedListeners.push(listener); } },
     onUpdated: { addListener(listener) { tabUpdatedListeners.push(listener); }, removeListener() {} },
     onRemoved: { addListener(listener) { tabRemovedListeners.push(listener); } },
@@ -405,5 +434,15 @@ const captureStopped = await new Promise((resolve) => {
 });
 assert.equal(captureStopped.ok, true);
 assert.equal(debuggerAttached, false);
+
+const preparedDebug = await new Promise((resolve) => {
+  runtimeHandler({ type: "debug-capture-prepare", tabId: 11 }, {}, resolve);
+});
+assert.equal(preparedDebug.ok, true);
+assert.equal(preparedDebug.reloaded, true);
+assert.equal(reloadCalls, 1);
+assert.match(preparedDebug.snapshot, /\/api\/prepared/);
+assert.match(preparedDebug.snapshot, /prepared-console/);
+assert.equal(debuggerAttached, false, "automatic capture should detach after snapshotting");
 
 console.log("ok  - background tool-free reasoning integration");

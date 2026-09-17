@@ -7,6 +7,7 @@ import { packBrowserContext, stripMentionTokens, localPathHintFromURL } from "./
 import { titleFromUserText } from "./lib/threads.js";
 import { mapHostEventToUI } from "./lib/events.js";
 import { isDebugQuestion } from "./lib/debug-capture.js";
+import { formatNativeHostError, isNativeHostMissingError } from "./lib/host-bridge.js";
 import {
   PAGE_SCOPE_STORE_KEY,
   DEFAULT_THREAD_TITLE,
@@ -51,13 +52,6 @@ const state = {
   mediaRecorder: null,
   mediaStream: null,
   recordingChunks: [],
-  debugCapture: {
-    active: false,
-    tabId: null,
-    startedAt: null,
-    networkCount: 0,
-    consoleCount: 0,
-  },
 };
 
 function hideEmpty() {
@@ -290,8 +284,18 @@ function appendThinking(text) {
 }
 
 function appendError(text) {
+  const hostMissing =
+    isNativeHostMissingError(text) || String(text || "").includes("仅复制 extension 文件夹不能运行");
+  text = formatNativeHostError(text);
   hideEmpty();
   const log = $("log");
+  if (
+    hostMissing &&
+    [...log.querySelectorAll(".err-banner")].some((banner) => banner.textContent === text)
+  ) {
+    scrollLog();
+    return;
+  }
   const last = log.lastElementChild;
   if (last?.classList?.contains("err-banner") && last.textContent === text) {
     scrollLog();
@@ -431,16 +435,7 @@ function onBackgroundMessage(msg) {
   }
   if (msg.type === "active-page-changed" && msg.page) {
     if (state.windowId != null && msg.page.windowId !== state.windowId) return;
-    queuePageActivation(msg.page).then(() => refreshDebugCapture(msg.page.tabId)).catch(() => {});
-    return;
-  }
-  if (msg.type === "debug-capture-status" && msg.status) {
-    if (
-      state.lastPage?.tabId != null &&
-      Number(msg.status.tabId) !== Number(state.lastPage.tabId)
-    ) return;
-    state.debugCapture = msg.status;
-    renderDebugCaptureControls();
+    queuePageActivation(msg.page).catch(() => {});
     return;
   }
   if (msg.type === "page-tab-removed") {
@@ -836,73 +831,6 @@ async function addChipFromKind(kind) {
   }
 }
 
-function renderDebugCaptureControls() {
-  const status = state.debugCapture || {};
-  const toggle = $("btn-debug-toggle");
-  const snapshot = $("btn-debug-snapshot");
-  const note = $("debug-capture-note");
-  if (!toggle || !snapshot || !note) return;
-  toggle.dataset.active = String(!!status.active);
-  toggle.textContent = status.active
-    ? "停止采集 Network / Console"
-    : "开始采集 Network / Console";
-  snapshot.hidden = !status.active;
-  note.textContent = status.active
-    ? `正在采集：${status.networkCount || 0} 个请求，${status.consoleCount || 0} 条控制台信息。`
-    : "开始后刷新页面或复现问题。";
-}
-
-async function refreshDebugCapture(tabId = state.lastPage?.tabId) {
-  if (tabId == null) return;
-  const response = await chrome.runtime.sendMessage({ type: "debug-capture-status", tabId });
-  if (response?.ok && response.status) {
-    state.debugCapture = response.status;
-    renderDebugCaptureControls();
-  }
-}
-
-async function toggleDebugCapture() {
-  let tabId = state.lastPage?.tabId;
-  if (state.debugCapture?.active && tabId != null && Number(state.debugCapture.tabId) === Number(tabId)) {
-    const response = await chrome.runtime.sendMessage({ type: "debug-capture-stop", tabId });
-    if (!response?.ok) throw new Error(response?.error || "停止调试采集失败");
-    state.debugCapture = response.status;
-    renderDebugCaptureControls();
-    setMediaStatus("调试采集已停止");
-    return;
-  }
-
-  if (tabId == null) {
-    await collectPage();
-    tabId = state.lastPage?.tabId;
-  }
-  if (tabId == null) throw new Error("无法确定当前标签页。");
-  const response = await chrome.runtime.sendMessage({ type: "debug-capture-start", tabId });
-  if (!response?.ok) throw new Error(response?.error || "启动调试采集失败");
-  state.debugCapture = response.status;
-  renderDebugCaptureControls();
-  setMediaStatus("采集已开始，请刷新页面或复现问题");
-}
-
-async function attachDebugSnapshot() {
-  const tabId = state.lastPage?.tabId;
-  if (tabId == null) throw new Error("无法确定当前标签页。");
-  const response = await chrome.runtime.sendMessage({ type: "debug-capture-snapshot", tabId });
-  if (!response?.ok) throw new Error(response?.error || "读取调试快照失败");
-  state.chips = state.chips.filter((chip) => chip.kind !== "debug");
-  addChip({
-    kind: "debug",
-    title: `调试快照 ${response.status?.networkCount || 0}/${response.status?.consoleCount || 0}`,
-    text: response.snapshot || "",
-  });
-  const input = $("input");
-  if (!input.value.trim()) input.value = "请分析附带的 Network 和 Console 快照，定位问题并给出修复建议。";
-  autosizeInput();
-  closePopovers();
-  input.focus();
-  setMediaStatus("调试快照已附加");
-}
-
 // Attach / settings — floating popovers, never stay in document flow
 $("btn-attach").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -911,7 +839,6 @@ $("btn-attach").addEventListener("click", (e) => {
   $("btn-settings").setAttribute("aria-expanded", "false");
   $("attach-menu").hidden = !willOpen;
   $("btn-attach").setAttribute("aria-expanded", String(willOpen));
-  if (willOpen) refreshDebugCapture().catch(() => {});
   if (willOpen) requestAnimationFrame(() => $("attach-menu").querySelector("button")?.focus());
 });
 document.querySelectorAll("[data-add-chip]").forEach((btn) => {
@@ -921,24 +848,6 @@ document.querySelectorAll("[data-add-chip]").forEach((btn) => {
     $("btn-attach").setAttribute("aria-expanded", "false");
     $("input").focus();
   });
-});
-
-$("btn-debug-toggle")?.addEventListener("click", async (event) => {
-  event.stopPropagation();
-  try {
-    await toggleDebugCapture();
-  } catch (error) {
-    appendError(String(error?.message || error));
-  }
-});
-
-$("btn-debug-snapshot")?.addEventListener("click", async (event) => {
-  event.stopPropagation();
-  try {
-    await attachDebugSnapshot();
-  } catch (error) {
-    appendError(String(error?.message || error));
-  }
 });
 
 $("btn-settings").addEventListener("click", (e) => {
@@ -1476,36 +1385,44 @@ $("btn-send").addEventListener("click", async () => {
     return;
   }
 
+  let autoDebugChip = null;
+  const hasDebugChip = state.chips.some((chip) => chip.kind === "debug");
+  if (isDebugQuestion(raw) && !hasDebugChip) {
+    try {
+      setMediaStatus("正在自动读取 Network / Console…");
+      const prepared = await chrome.runtime.sendMessage({
+        type: "debug-capture-prepare",
+        tabId: page.tabId,
+      });
+      if (!prepared?.ok) throw new Error(prepared?.error || "读取调试信息失败");
+      autoDebugChip = {
+        kind: "debug",
+        title: `自动调试快照 ${prepared.status?.networkCount || 0}/${prepared.status?.consoleCount || 0}`,
+        text: prepared.snapshot || "",
+      };
+      if (prepared.reloaded) {
+        page = await collectPage(page.tabId);
+        if (!page) throw new Error("刷新后无法读取当前标签页");
+        await queuePageActivation(page);
+        await scopePersistQueue.catch(() => {});
+      }
+      setMediaStatus("调试信息已读取");
+    } catch (error) {
+      setMediaStatus("");
+      appendError(String(error?.message || error));
+      return;
+    }
+  }
+
   const turnScope = state.scopeKey;
   if (!turnScope) {
     appendError("当前页面没有可用的隔离作用域。");
     return;
   }
 
-  const hasDebugChip = state.chips.some((chip) => chip.kind === "debug");
-  if (isDebugQuestion(raw) && !hasDebugChip) {
-    try {
-      await refreshDebugCapture(page.tabId);
-    } catch {
-      // 后台状态读取失败时继续走普通对话，不在这里制造额外阻断。
-    }
-    if (!state.debugCapture?.active) {
-      appendError("当前页还没有开启调试采集。请点输入框左下角 ＠ → 开始采集 Network / Console，然后刷新页面或复现问题。");
-      $("settings-panel").hidden = true;
-      $("attach-menu").hidden = false;
-      $("btn-attach").setAttribute("aria-expanded", "true");
-      $("btn-debug-toggle")?.focus();
-      return;
-    }
-    if (!(state.debugCapture.networkCount || state.debugCapture.consoleCount)) {
-      appendError("调试采集已经开启，但还没有记录到请求或控制台信息。请刷新页面或复现问题后再发送。");
-      return;
-    }
-  }
-
   // 页面作用域确认后再快照 session/chip，禁止沿用上一网页的状态。
   const displayText = stripMentionTokens(raw) || raw;
-  const chipsSnapshot = state.chips.slice();
+  const chipsSnapshot = autoDebugChip ? [...state.chips, autoDebugChip] : state.chips.slice();
   const cwd = $("cwd").value.trim();
   const dryRun = !!$("dry-run").checked;
   const attachBody = $("attach-body")?.checked !== false;
@@ -1602,11 +1519,13 @@ $("btn-send").addEventListener("click", async () => {
     replayEventsIfNeeded(result?.events || []);
   } catch (e) {
     if (state.scopeKey === turnScope && state.requestId === requestId) {
-      appendError(String(e));
-      setHostStatus(false, String(e));
+      const message = formatNativeHostError(String(e));
+      appendError(message);
+      setHostStatus(false, message);
     }
   } finally {
     clearTimeout(busyWatchdog);
+    if (autoDebugChip) setMediaStatus("");
     if (state.requestId === requestId) {
       state.requestId = "";
       setBusy(false);
@@ -1706,18 +1625,23 @@ $("btn-toggle-selection-site").addEventListener("click", async () => {
 
 // Init
 renderChips();
-renderDebugCaptureControls();
-initializePageScope()
-  .then(() => refreshDebugCapture())
-  .catch((error) => appendError(String(error)));
+initializePageScope().catch((error) => appendError(String(error)));
 autosizeInput();
 chrome.runtime
   .sendMessage({ type: "host-ping" })
   .then((r) => {
     if (r?.ok) setHostStatus(true, `host ${r.version || "ok"}`);
-    else setHostStatus(false, r?.error || "host unavailable");
+    else {
+      const message = formatNativeHostError(r?.error || "host unavailable");
+      setHostStatus(false, message);
+      if (r?.error) appendError(message);
+    }
   })
-  .catch((e) => setHostStatus(false, String(e?.message || e)));
+  .catch((e) => {
+    const message = formatNativeHostError(String(e?.message || e));
+    setHostStatus(false, message);
+    appendError(message);
+  });
 
 chrome.runtime
   .sendMessage({ type: "consume-pending-ask" })

@@ -27,6 +27,9 @@ mac_script = (ROOT / "packaging/macos/scripts/postinstall").read_text(encoding="
 mac_builder = (ROOT / "packaging/macos/build-pkg.sh").read_text(encoding="utf-8")
 windows_iss = (ROOT / "packaging/windows/AnnengAssistant.iss").read_text(encoding="utf-8")
 workflow = (ROOT / ".github/workflows/build-installers.yml").read_text(encoding="utf-8")
+portable_windows_cross_builder = (ROOT / "packaging/build-portable-windows.sh").read_text(encoding="utf-8")
+portable_windows_builder = (ROOT / "packaging/windows/build-portable.ps1").read_text(encoding="utf-8")
+portable_windows_installer = (ROOT / "packaging/portable/windows/install-host.ps1").read_text(encoding="utf-8")
 
 host_name = "com.hzy9738.sidechat"
 for source in (background, mac_script, windows_iss):
@@ -68,6 +71,14 @@ assert "DEV-UNPUBLISHED" in mac_builder
 assert "start_selected=\"system.files.fileExistsAtPath('/Applications/Google Chrome.app')\"" in mac_builder
 assert "start_visible=\"system.files.fileExistsAtPath('/Applications/Google Chrome.app')\"" in mac_builder
 assert "SkipExtensionSourceCheck" in (ROOT / "packaging/windows/build-installer.ps1").read_text(encoding="utf-8")
+
+assert development_id in portable_windows_installer
+for source in (portable_windows_builder, portable_windows_cross_builder):
+    assert "quick-card.js" in source
+assert "quick-card.js" in (ROOT / "packaging/build-extension-zip.sh").read_text(encoding="utf-8")
+assert "HKCU:" in portable_windows_installer
+assert "Google\\Chrome\\NativeMessagingHosts" in portable_windows_installer
+assert "$BundleDir = $PSScriptRoot" in portable_windows_installer
 
 if os.uname().sysname == "Darwin":
     with tempfile.TemporaryDirectory(prefix="anneng-installer-test-") as temp:

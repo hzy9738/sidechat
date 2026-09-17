@@ -60,6 +60,7 @@ jobs:
           packaging/build-extension-zip.sh
           packaging/macos/build-pkg.sh
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: anneng-assistant-macos
           path: |
@@ -90,12 +91,18 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ inputs.version || github.ref_name }}" -replace '^v',''
+          ./packaging/windows/build-portable.ps1 `
+            -AppVersion $version `
+            -HostBinary "$pwd\host-rs\target\release\sidechat-host.exe"
           ./packaging/windows/build-installer.ps1 `
             -AppVersion $version `
             -ExtensionId "$env:EXTENSION_ID" `
             -ExtensionUpdateUrl "${{ inputs.extension_update_url || 'https://clients2.google.com/service/update2/crx' }}" `
             -HostBinary "$pwd\host-rs\target\release\sidechat-host.exe"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: anneng-assistant-windows
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*-portable.zip

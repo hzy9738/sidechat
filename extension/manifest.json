@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "安能助手",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "通用型浏览器智能助手：对话、语音输入、识图、PDF 阅读和页面上下文问答。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnLU1kK0zSeDbuR07fA23kYHopG1wWRycEuwccArs2Ze/GPfmN1Y4Puw7s7C/DgPedtk6HoNemK4h7UFFpurwJmlPGYUdgZR5v9S/8hzwarcuvtmd5q5q+6OCpuoZEv8QGNOvI8vstY8q50vHgbKZprWPhZrKT0bZlO//7GzL2DNzmus3WBEHe3xHfJGuFahQLDxy7O1sAnv8AQmuHRcgB7skemIK6izQj8r3JDkeXZVwhKjW+LdbPX+0Ou4plsRqXK9r3auDIw/Xk/yeDM+/YicPpUlFL58FJGYRgyscF1WS1w/4qQz9YuoO0F6JZ5TP1/K9prt/aJzAGXR9HiSTfQIDAQAB",
   "permissions": [

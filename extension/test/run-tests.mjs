@@ -242,6 +242,15 @@ test("isNativeHostMissingError", () => {
   assert.equal(hostBridge.isNativeHostMissingError("other"), false);
 });
 
+test("formatNativeHostError gives an actionable Chinese installer hint", () => {
+  const message = hostBridge.formatNativeHostError(
+    "Error: Specified native messaging host not found."
+  );
+  assert.match(message, /仅复制 extension 文件夹不能运行/);
+  assert.match(message, /install-host/);
+  assert.equal(hostBridge.formatNativeHostError("upstream failed"), "upstream failed");
+});
+
 test("UI and background force tool-free mode", async () => {
   const fs = await import("node:fs");
   const sp = fs.readFileSync(path.join(__dirname, "..", "sidepanel.js"), "utf8");
@@ -271,8 +280,9 @@ test("sidepanel exposes keyboard and streaming interaction affordances", () => {
   assert.ok(js.includes('state.followOutput = isLogNearBottom()'));
   assert.ok(js.includes('e.key === "ArrowDown" || e.key === "ArrowUp"'));
   assert.ok(js.includes("finishThinking()"));
-  assert.ok(html.includes('id="btn-debug-toggle"'));
-  assert.ok(html.includes('id="btn-debug-snapshot"'));
+  assert.equal(html.includes('id="btn-debug-toggle"'), false);
+  assert.equal(html.includes('id="btn-debug-snapshot"'), false);
+  assert.ok(js.includes('type: "debug-capture-prepare"'));
   assert.equal(js.includes('permissions.request({ permissions: ["debugger"] })'), false);
   assert.ok(css.includes("prefers-reduced-motion: reduce"));
 });

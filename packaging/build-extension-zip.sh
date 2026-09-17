@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${APP_VERSION:-0.6.3}"
+VERSION="${APP_VERSION:-$(/usr/bin/sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "$ROOT/extension/manifest.json" | /usr/bin/head -1)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/anneng-extension.XXXXXX")"
 
@@ -10,7 +10,7 @@ cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK_DIR/extension" "$OUTPUT_DIR"
-for item in background.js content.css content.js manifest.json sidepanel.css sidepanel.html sidepanel.js icons lib; do
+for item in background.js content.css content.js manifest.json quick-card.js sidepanel.css sidepanel.html sidepanel.js icons lib; do
   cp -R "$ROOT/extension/$item" "$WORK_DIR/extension/"
 done
 

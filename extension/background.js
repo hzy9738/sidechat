@@ -4,7 +4,7 @@
  */
 
 import { localPathHintFromURL } from "./lib/context.js";
-import { normalizeHostPingResult } from "./lib/host-bridge.js";
+import { formatNativeHostError, normalizeHostPingResult } from "./lib/host-bridge.js";
 import {
   DEBUG_CONSOLE_LIMIT,
   DEBUG_NETWORK_LIMIT,
@@ -30,7 +30,7 @@ const DEFAULT_MODEL = "";
 const PENDING_ASK_KEY = "pendingAsk";
 const DEBUG_PROTOCOL_VERSION = "1.3";
 
-/** @type {Map<number, {tabId:number,url:string,startedAt:number,network:any[],console:any[],requests:Map<string, any>}>} */
+/** @type {Map<number, {tabId:number,url:string,startedAt:number,lastEventAt:number,network:any[],console:any[],requests:Map<string, any>}>} */
 const debugCaptures = new Map();
 const debugStatusTimers = new Map();
 
@@ -96,6 +96,7 @@ async function startDebugCapture(tabId) {
     tabId: tab.id,
     url: tab.url || "",
     startedAt: Date.now(),
+    lastEventAt: Date.now(),
     network: [],
     console: [],
     requests: new Map(),
@@ -113,6 +114,69 @@ async function stopDebugCapture(tabId) {
   if (chrome.debugger) await chrome.debugger.detach(debugTarget(id)).catch(() => {});
   broadcastDebugStatus(id);
   return { ok: true, status: debugCaptureStatus(id) };
+}
+
+function reloadTabAndWait(tabId, timeoutMs = 12_000) {
+  const id = Number(tabId);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(result);
+    };
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (Number(updatedTabId) === id && changeInfo.status === "complete") {
+        finish({ complete: true });
+      }
+    };
+    const timer = setTimeout(() => finish({ complete: false, timedOut: true }), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    Promise.resolve(chrome.tabs.reload(id)).catch((error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(error);
+    });
+  });
+}
+
+async function waitForDebugQuiet(tabId, timeoutMs = 5_000, quietMs = 700) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const capture = debugCaptures.get(Number(tabId));
+    if (!capture) return;
+    const hasEvents = capture.network.length > 0 || capture.console.length > 0;
+    if (hasEvents && Date.now() - capture.lastEventAt >= quietMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+async function prepareDebugSnapshot(tabId) {
+  const id = Number(tabId);
+  let reloaded = false;
+  try {
+    if (!debugCaptures.has(id)) await startDebugCapture(id);
+    const capture = debugCaptures.get(id);
+    if (!capture) throw new Error("调试采集没有成功启动。");
+    if (capture.network.length === 0 && capture.console.length === 0) {
+      reloaded = true;
+      await reloadTabAndWait(id);
+    }
+    await waitForDebugQuiet(id);
+    const current = debugCaptures.get(id);
+    if (!current) throw new Error("调试采集意外中断。");
+    const status = debugCaptureStatus(id);
+    const snapshot = formatDebugSnapshot(current);
+    await stopDebugCapture(id);
+    return { ok: true, reloaded, status, snapshot };
+  } catch (error) {
+    await stopDebugCapture(id).catch(() => {});
+    throw error;
+  }
 }
 
 function addNetworkEntry(capture, params) {
@@ -162,6 +226,7 @@ chrome.debugger?.onEvent?.addListener((source, method, params = {}) => {
   const tabId = Number(source?.tabId);
   const capture = debugCaptures.get(tabId);
   if (!capture) return;
+  capture.lastEventAt = Date.now();
 
   if (method === "Network.requestWillBeSent") {
     addNetworkEntry(capture, params);
@@ -457,6 +522,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === "debug-capture-prepare") {
+    prepareDebugSnapshot(msg.tabId)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
+  }
+
   if (msg?.type === "debug-capture-start") {
     startDebugCapture(msg.tabId)
       .then((result) => sendResponse(result))
@@ -504,7 +576,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "quick-card-send") {
     sendQuickCardTurn(msg, sender)
       .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+      .catch((err) => sendResponse({ ok: false, error: formatNativeHostError(String(err)) }));
     return true;
   }
 

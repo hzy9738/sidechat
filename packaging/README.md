@@ -1,5 +1,27 @@
 # 安能助手安装包
 
+## 直接拷贝给另一台电脑（加载已解压版）
+
+`extension/` 只有浏览器端代码，不能安装 Chrome Native Messaging Host；单独复制后会报 `Specified native messaging host not found.`。Windows 开发/内测分发可使用包含扩展、Host 和注册脚本的便携包。
+
+macOS 不提供未签名便携脚本：从聊天、邮件或浏览器下载后会被 Gatekeeper 拦截，而且隔离标记会继续传到 Host。macOS 必须使用下文由有效 Developer ID Installer 证书签名并完成公证的 `.pkg`。
+
+Windows（在 Windows 构建机执行）：
+
+```powershell
+cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host
+./packaging/windows/build-portable.ps1
+```
+
+也可以在 macOS 使用 `cargo-xwin` 交叉编译并打包：
+
+```bash
+cargo xwin build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host --target x86_64-pc-windows-msvc
+HOST_BINARY="$PWD/host-rs/target/x86_64-pc-windows-msvc/release/sidechat-host.exe" packaging/build-portable-windows.sh
+```
+
+把 `dist/Anneng-Assistant-*-Windows-x64-portable.zip` 发给对方。对方完整解压后先双击 `install-host.cmd`，重启 Chrome，再加载包内 `extension/`。便携包固定使用仓库 `manifest.json` 的开发 ID `gjpmflfaadhcbbcckbmbccggfpbdjdel`。
+
 安装包面向公司受管设备。用户不需要打开扩展商店或开发者模式：安装器把 Rust Host 安装到系统目录，并为已安装的 Chrome、Edge、Brave、Chromium、ego lite 写入扩展策略与 Native Messaging 注册信息。
 
 ## 发布前必须完成

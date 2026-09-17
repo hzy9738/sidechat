@@ -579,25 +579,6 @@ input:focus-visible {
   font-size: 14px;
 }
 .attach-menu button:hover { background: var(--soft); }
-.attach-separator {
-  height: 1px;
-  margin: 3px 12px;
-  background: var(--border);
-}
-.attach-note {
-  margin: -2px 14px 10px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-#btn-debug-toggle[data-active="true"] {
-  color: var(--danger);
-  font-weight: 650;
-}
-#btn-debug-snapshot {
-  color: var(--accent);
-  font-weight: 650;
-}
 
 .settings {
   padding: 4px 12px 12px;

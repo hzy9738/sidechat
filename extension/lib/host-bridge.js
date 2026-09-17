@@ -44,3 +44,15 @@ export function isNativeHostMissingError(message) {
     m.includes("host not found")
   );
 }
+
+/**
+ * 把 Chrome 原生英文错误转成可执行的安装指引。
+ * @param {string} message
+ */
+export function formatNativeHostError(message) {
+  const raw = String(message || "").replace(/^Error:\s*/i, "").trim();
+  if (isNativeHostMissingError(raw)) {
+    return "本机尚未安装安能助手 Host。仅复制 extension 文件夹不能运行；请先运行配套安装包中的 install-host，再完全退出并重开 Chrome。";
+  }
+  return raw || "无法连接安能助手 Host。";
+}
