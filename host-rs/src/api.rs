@@ -6,6 +6,12 @@ use std::path::PathBuf;
 
 const TOOL_FREE_SYSTEM: &str = "你是安能助手，由正泰安能提供的通用浏览器智能助手。对用户询问身份、来源或所属产品时，只能回答你是安能助手；不得自称 TRAE、TRAE 内置模型、IDE 助手或其他产品。你通过公司私有化模型服务回答问题。只能根据用户消息和只读页面上下文回答，不能操作网页、执行命令、搜索或调用任何工具。";
 
+/// ureq 的读超时同时作用于两个阶段，取值需要兼顾：
+/// - 等待响应头：超过该时长仍未返回则请求报错（实测公司网关 TTFB ≈ 0.5s，5s 留出余量）；
+/// - 读取响应体：读超时视为「暂时无数据」，消费循环继续等待并轮询取消标志，
+///   因此取消在服务端停顿时最迟于该时长内生效（UI 由主循环立即回执，此处只影响底层读取）。
+const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Debug, Clone, Default)]
 pub struct ChatAPIConfig {
     pub base_url: String,
@@ -208,10 +214,10 @@ pub fn send_stream(
         stream: true,
         thinking: json!({"type": "enabled"}),
     };
-    // 读超时让阻塞的流式读定期返回，消费循环才能及时响应取消；空闲超时不视为错误。
+    // 读超时的两阶段语义见 STREAM_READ_TIMEOUT 注释。
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout_read(std::time::Duration::from_millis(500))
+        .timeout_read(STREAM_READ_TIMEOUT)
         .build();
     let mut req = agent
         .post(&endpoint)
@@ -343,6 +349,9 @@ fn consume_openai_stream(
             },
         }
         let full = std::mem::take(&mut line);
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let (th, tx, done) = parse_openai_stream_line(&full)?;
         if !th.is_empty() {
             thinking.push_str(&th);
@@ -489,5 +498,216 @@ mod tests {
             r#"模型服务返回 HTTP 400: {"error":{"message":"invalid model"}}"#
         );
         assert_eq!(format_http_error(503, "  "), "模型服务返回 HTTP 503");
+    }
+
+    // ---- 本地 SSE 服务器回归测试：读超时与取消 ----
+
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// 读完请求头与请求体。服务端若带着未读数据先关闭，内核会发 RST，
+    /// 客户端在后续 setsockopt/read 上会看到 EINVAL/ECONNRESET，干扰测试。
+    fn drain_request(stream: &mut TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 4096];
+        let mut seen = Vec::new();
+        let head_end;
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    seen.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                        head_end = pos + 4;
+                        break;
+                    }
+                }
+            }
+        }
+        let head = String::from_utf8_lossy(&seen[..head_end]).to_lowercase();
+        let content_len = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body_read = seen.len() - head_end;
+        while body_read < content_len {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => body_read += n,
+            }
+        }
+    }
+
+    fn write_chunk(stream: &mut TcpStream, payload: &str) -> std::io::Result<()> {
+        write!(stream, "{:x}\r\n{}\r\n", payload.len(), payload)?;
+        stream.flush()
+    }
+
+    fn write_sse_headers(stream: &mut TcpStream) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+        );
+        let _ = stream.flush();
+    }
+
+    fn delta_event(text: &str) -> String {
+        format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n")
+    }
+
+    fn finish_stream(stream: &mut TcpStream) {
+        let _ = write_chunk(stream, "data: [DONE]\n\n");
+        let _ = write!(stream, "0\r\n\r\n");
+        let _ = stream.flush();
+    }
+
+    /// 返回 (base_url, 服务器线程)。
+    fn spawn_sse_server(
+        handler: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                drain_request(&mut stream);
+                handler(stream);
+            }
+        });
+        (format!("http://127.0.0.1:{port}/v1"), handle)
+    }
+
+    /// 等待客户端先关闭连接（正常完成路径），避免服务端先关闭产生 RST。
+    fn wait_for_client_close(stream: &mut TcpStream, timeout: Duration) {
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        let mut buf = [0u8; 128];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    }
+
+    fn test_cfg(base_url: &str) -> ChatAPIConfig {
+        ChatAPIConfig {
+            base_url: base_url.to_string(),
+            api_key: String::new(),
+            model: "test-model".into(),
+            vision_model: String::new(),
+        }
+    }
+
+    #[test]
+    fn tolerates_slow_response_headers() {
+        let (base, server) = spawn_sse_server(|mut stream| {
+            thread::sleep(Duration::from_millis(1500));
+            write_sse_headers(&mut stream);
+            let _ = write_chunk(&mut stream, &delta_event("慢"));
+            finish_stream(&mut stream);
+            wait_for_client_close(&mut stream, Duration::from_secs(5));
+        });
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let out = send_stream(&test_cfg(&base), vec![], &cancel, |_, _| {});
+        server.join().unwrap();
+        let (assistant, _) = out.expect("1.5s 的响应头延迟不应导致请求失败");
+        assert_eq!(assistant, "慢");
+    }
+
+    #[test]
+    fn tolerates_idle_gaps_between_chunks() {
+        let (base, server) = spawn_sse_server(|mut stream| {
+            write_sse_headers(&mut stream);
+            let _ = write_chunk(&mut stream, &delta_event("甲"));
+            thread::sleep(Duration::from_millis(1500));
+            let _ = write_chunk(&mut stream, &delta_event("乙"));
+            finish_stream(&mut stream);
+            wait_for_client_close(&mut stream, Duration::from_secs(5));
+        });
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let out = send_stream(&test_cfg(&base), vec![], &cancel, |_, _| {});
+        server.join().unwrap();
+        let (assistant, _) = out.expect("分片间隔 1.5s 不应导致请求失败");
+        assert_eq!(assistant, "甲乙");
+    }
+
+    #[test]
+    fn cancel_stops_streaming_and_closes_connection() {
+        let (closed_tx, closed_rx) = mpsc::channel::<()>();
+        let (base, server) = spawn_sse_server(move |mut stream| {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            write_sse_headers(&mut stream);
+            let _ = write_chunk(&mut stream, &delta_event("首"));
+            let mut buf = [0u8; 64];
+            for i in 0..200 {
+                thread::sleep(Duration::from_millis(50));
+                if write_chunk(&mut stream, &delta_event(&format!("后续{i}"))).is_err() {
+                    break;
+                }
+                if matches!(stream.read(&mut buf), Ok(0)) {
+                    break;
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let emitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let emitted_in_cb = emitted.clone();
+        let started = Instant::now();
+        let out = send_stream(&test_cfg(&base), vec![], &cancel, move |_, _| {
+            emitted_in_cb.fetch_add(1, Ordering::Relaxed);
+        });
+        let elapsed = started.elapsed();
+        let (assistant, _) = out.expect("取消应返回已收到的部分内容");
+        assert!(assistant.starts_with('首'));
+        assert!(elapsed < Duration::from_secs(2), "取消耗时 {elapsed:?}");
+        assert!(
+            emitted.load(Ordering::Relaxed) < 10,
+            "取消后不应继续收到大量增量"
+        );
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("取消后客户端应及时关闭连接");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancel_during_stalled_stream_bounded_by_read_timeout() {
+        let (base, server) = spawn_sse_server(|mut stream| {
+            write_sse_headers(&mut stream);
+            let _ = write_chunk(&mut stream, &delta_event("首"));
+            // 服务端停住不再发送；客户端取消后应关闭连接使 read 返回。
+            wait_for_client_close(&mut stream, STREAM_READ_TIMEOUT + Duration::from_secs(5));
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let out = send_stream(&test_cfg(&base), vec![], &cancel, |_, _| {});
+        let elapsed = started.elapsed();
+        let (assistant, _) = out.expect("停顿时取消应返回已收到的部分内容");
+        assert_eq!(assistant, "首");
+        assert!(
+            elapsed < STREAM_READ_TIMEOUT + Duration::from_secs(2),
+            "停顿期间取消耗时 {elapsed:?} 应不超过读超时"
+        );
+        server.join().unwrap();
     }
 }
