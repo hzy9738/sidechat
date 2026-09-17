@@ -33,7 +33,7 @@ for root in roots:
             path = str(meta.get("path") or "")
             manifest = meta.get("manifest") if isinstance(meta.get("manifest"), dict) else {}
             name = str(manifest.get("name") or "")
-            if "grok-sidechat" in path:
+            if "sidechat" in path:
                 found.append(eid)
 # Prefer key-stable default if present, else first found
 print(found[0] if found else "")
@@ -57,7 +57,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "需要安装 Rust（cargo）。见 https://rustup.rs" >&2
   exit 2
 fi
-(cd "$HOST_DIR" && cargo build --release --bin grok-sidechat-host)
+(cd "$HOST_DIR" && cargo build --release --bin sidechat-host)
 chmod +x "$BIN"
 
 # Ensure absolute path
@@ -76,7 +76,7 @@ else
   echo "提示: 未找到 $HOST_CONFIG，Host 将只使用扩展设置或 SIDECHAT_* 环境变量。"
 fi
 
-MANIFEST_NAME="com.hzy9738.grok_sidechat.json"
+MANIFEST_NAME="com.hzy9738.sidechat.json"
 TMP="$(mktemp)"
 
 python3 - "$TMP" "$BIN" "$EXT_ID" "$DEV_EXT_ID" <<'PY'
@@ -88,7 +88,7 @@ for eid in (ext_id, dev_id):
     if eid and origin not in origins:
         origins.append(origin)
 data = {
-    "name": "com.hzy9738.grok_sidechat",
+    "name": "com.hzy9738.sidechat",
     "description": "安能助手 native host — OpenAI-compatible APIs",
     "path": binary,
     "type": "stdio",
@@ -132,6 +132,6 @@ done
 # Do not overwrite the in-repo template (HOST_BINARY_PATH / EXTENSION_ID placeholders).
 rm -f "$TMP"
 echo "Host binary: $BIN"
-echo "Native host name: com.hzy9738.grok_sidechat"
+echo "Native host name: com.hzy9738.sidechat"
 echo "allowed_origins: chrome-extension://$EXT_ID/ chrome-extension://$DEV_EXT_ID/"
 echo "Reload the extension and open the Side Panel (Cmd/Ctrl+Shift+.)."

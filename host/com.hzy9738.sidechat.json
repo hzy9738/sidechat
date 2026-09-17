@@ -1,5 +1,5 @@
 {
-  "name": "com.hzy9738.grok_sidechat",
+  "name": "com.hzy9738.sidechat",
   "description": "Side Chat native host — OpenAI-compatible Chat Completions",
   "path": "HOST_BINARY_PATH",
   "type": "stdio",

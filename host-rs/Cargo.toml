@@ -6,7 +6,7 @@ description = "安能助手 Native Messaging Host（Rust）"
 publish = false
 
 [[bin]]
-name = "grok-sidechat-host"
+name = "sidechat-host"
 path = "src/main.rs"
 
 [dependencies]

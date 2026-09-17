@@ -28,7 +28,7 @@ mac_builder = (ROOT / "packaging/macos/build-pkg.sh").read_text(encoding="utf-8"
 windows_iss = (ROOT / "packaging/windows/AnnengAssistant.iss").read_text(encoding="utf-8")
 workflow = (ROOT / ".github/workflows/build-installers.yml").read_text(encoding="utf-8")
 
-host_name = "com.hzy9738.grok_sidechat"
+host_name = "com.hzy9738.sidechat"
 for source in (background, mac_script, windows_iss):
     assert host_name in source
 for source in (mac_builder, windows_iss, workflow):
@@ -97,7 +97,7 @@ if os.uname().sysname == "Darwin":
             )
             subprocess.run(["bash", str(script_dir / "postinstall")], env=env, check=True)
 
-        manifests = list((root / "Library").rglob("com.hzy9738.grok_sidechat.json"))
+        manifests = list((root / "Library").rglob("com.hzy9738.sidechat.json"))
         assert len(manifests) == 5, manifests
         for path in manifests:
             data = json.loads(path.read_text(encoding="utf-8"))

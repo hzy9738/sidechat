@@ -15,7 +15,7 @@ trap cleanup EXIT
 
 if [[ ! -x "$HOST_SOURCE" ]]; then
   printf 'Host binary not found: %s\n' "$HOST_SOURCE" >&2
-  printf 'Run: cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host\n' >&2
+  printf 'Run: cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host\n' >&2
   exit 2
 fi
 if [[ ! "$EXTENSION_ID" =~ ^[a-p]{32}$ ]]; then

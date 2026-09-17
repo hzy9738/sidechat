@@ -12,7 +12,7 @@ import {
   removeScopesForTab,
 } from "./lib/page-scope.js";
 
-const NATIVE_HOST = "com.hzy9738.grok_sidechat";
+const NATIVE_HOST = "com.hzy9738.sidechat";
 const DEFAULT_MODEL = "";
 
 const PENDING_ASK_KEY = "pendingAsk";
@@ -47,7 +47,7 @@ function installContextMenus() {
   });
 }
 
-// 0.6.3 之前的版本可能保存过 Grok/TRAE 或测试网关配置，升级时清理一次；此后保留用户设置。
+// 0.6.3 之前的版本可能保存过旧网关配置，升级时清理一次；此后保留用户设置。
 const LEGACY_CONFIG_VERSION = "0.6.3";
 
 function versionBefore(version, boundary) {
@@ -74,7 +74,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.runtime.onStartup?.addListener?.(installContextMenus);
 
 chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "open-grok-side-panel") return;
+  if (command !== "open-side-panel") return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.windowId != null) {
     await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});

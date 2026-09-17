@@ -1,3 +1,3 @@
-module github.com/hzy9738/grok-sidechat/host
+module github.com/hzy9738/sidechat/host
 
 go 1.22

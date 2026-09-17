@@ -8,8 +8,8 @@ Chrome 扩展本身必须是 JS；关键密钥和接口配置封在 Rust Host �
 划词 / 右键选图 / 侧栏
         │  native messaging
         ▼
-grok-sidechat-host（Rust）
-        │  解密内置配置
+sidechat-host（Rust）
+        │  读取接口配置（环境变量 / anneng-config.json）
         ▼
 POST https://ai-model.chint.com/api/chat/completions
 ```
@@ -38,7 +38,7 @@ POST https://ai-model.chint.com/api/chat/completions
 ## 安装
 
 ```bash
-cd host-rs && cargo test && cargo build --release --bin grok-sidechat-host
+cd host-rs && cargo test && cargo build --release --bin sidechat-host
 cd .. && ./scripts/install-native-host.sh
 node extension/test/run-tests.mjs
 ```

@@ -32,12 +32,12 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Build universal host
         run: |
-          cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host --target aarch64-apple-darwin
-          cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host --target x86_64-apple-darwin
+          cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host --target aarch64-apple-darwin
+          cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host --target x86_64-apple-darwin
           mkdir -p build
           lipo -create \
-            host-rs/target/aarch64-apple-darwin/release/grok-sidechat-host \
-            host-rs/target/x86_64-apple-darwin/release/grok-sidechat-host \
+            host-rs/target/aarch64-apple-darwin/release/sidechat-host \
+            host-rs/target/x86_64-apple-darwin/release/sidechat-host \
             -output build/anneng-assistant-host
           chmod +x build/anneng-assistant-host
       - name: Inject host config
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build host
-        run: cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host
+        run: cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host
       - name: Inject host config
         shell: pwsh
         env:
@@ -94,7 +94,7 @@ jobs:
             -AppVersion $version `
             -ExtensionId "$env:EXTENSION_ID" `
             -ExtensionUpdateUrl "${{ inputs.extension_update_url || 'https://clients2.google.com/service/update2/crx' }}" `
-            -HostBinary "$pwd\host-rs\target\release\grok-sidechat-host.exe"
+            -HostBinary "$pwd\host-rs\target\release\sidechat-host.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: anneng-assistant-windows

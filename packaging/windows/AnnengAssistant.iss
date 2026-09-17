@@ -3,7 +3,7 @@
   #define AppVersion "0.6.3"
 #endif
 #ifndef HostBinary
-  #define HostBinary "..\..\host-rs\target\x86_64-pc-windows-msvc\release\grok-sidechat-host.exe"
+  #define HostBinary "..\..\host-rs\target\x86_64-pc-windows-msvc\release\sidechat-host.exe"
 #endif
 #ifndef HostConfig
   #define HostConfig "..\..\.secrets\host-config.json"
@@ -51,21 +51,21 @@ Name: "qqbrowser"; Description: "QQ 浏览器（兼容模式）"; GroupDescripti
 [Registry]
 ; Chrome: force-install extension and register native host.
 Root: HKLM64; Subkey: "Software\Policies\Google\Chrome\ExtensionInstallForcelist"; ValueType: string; ValueName: "{code:ChromePolicyValueName}"; ValueData: "{#ExtensionId};{#ExtensionUpdateUrl}"; Tasks: chrome; Flags: uninsdeletevalue
-Root: HKLM64; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.hzy9738.grok_sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: chrome; Flags: uninsdeletekey
+Root: HKLM64; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.hzy9738.sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: chrome; Flags: uninsdeletekey
 
 ; Edge can force-install the same Chromium extension from the configured update service.
 Root: HKLM64; Subkey: "Software\Policies\Microsoft\Edge\ExtensionInstallForcelist"; ValueType: string; ValueName: "{code:EdgePolicyValueName}"; ValueData: "{#ExtensionId};{#ExtensionUpdateUrl}"; Tasks: edge; Flags: uninsdeletevalue
-Root: HKLM64; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.hzy9738.grok_sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: edge; Flags: uninsdeletekey
+Root: HKLM64; Subkey: "Software\Microsoft\Edge\NativeMessagingHosts\com.hzy9738.sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: edge; Flags: uninsdeletekey
 
 ; Brave policy/native-host locations.
 Root: HKLM64; Subkey: "Software\Policies\BraveSoftware\Brave\ExtensionInstallForcelist"; ValueType: string; ValueName: "{code:BravePolicyValueName}"; ValueData: "{#ExtensionId};{#ExtensionUpdateUrl}"; Tasks: brave; Flags: uninsdeletevalue
-Root: HKLM64; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.hzy9738.grok_sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: brave; Flags: uninsdeletekey
+Root: HKLM64; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.hzy9738.sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: brave; Flags: uninsdeletekey
 
 ; 360/QQ consumer editions don't publish stable force-install policy locations.
 ; Register the host in the Chromium and Chrome-compatible fallback locations;
 ; the extension itself must be distributed through the vendor store or enterprise console.
-Root: HKLM64; Subkey: "Software\Chromium\NativeMessagingHosts\com.hzy9738.grok_sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: 360safe 360speed qqbrowser; Flags: uninsdeletekey
-Root: HKLM64; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.hzy9738.grok_sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: 360safe 360speed qqbrowser; Flags: uninsdeletekey
+Root: HKLM64; Subkey: "Software\Chromium\NativeMessagingHosts\com.hzy9738.sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: 360safe 360speed qqbrowser; Flags: uninsdeletekey
+Root: HKLM64; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.hzy9738.sidechat"; ValueType: string; ValueName: ""; ValueData: "{app}\native-host.json"; Tasks: 360safe 360speed qqbrowser; Flags: uninsdeletekey
 
 [Code]
 const
@@ -144,7 +144,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     Manifest := '{' + #13#10 +
-      '  "name": "com.hzy9738.grok_sidechat",' + #13#10 +
+      '  "name": "com.hzy9738.sidechat",' + #13#10 +
       '  "description": "安能助手 Native Messaging Host",' + #13#10 +
       '  "path": "' + AddBackslash(ExpandConstant('{app}')) + 'anneng-assistant-host.exe",' + #13#10 +
       '  "type": "stdio",' + #13#10 +

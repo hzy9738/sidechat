@@ -38,7 +38,7 @@
     "128": "icons/icon128.png"
   },
   "commands": {
-    "open-grok-side-panel": {
+    "open-side-panel": {
       "description": "打开安能助手侧栏",
       "suggested_key": {
         "default": "Ctrl+Shift+Period",

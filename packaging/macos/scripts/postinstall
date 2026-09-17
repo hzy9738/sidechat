@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-HOST_NAME="com.hzy9738.grok_sidechat"
+HOST_NAME="com.hzy9738.sidechat"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_ROOT="${ANNENG_INSTALL_ROOT:-}"
 HOST_PATH="$TARGET_ROOT/Library/Application Support/Anneng Assistant/anneng-assistant-host"

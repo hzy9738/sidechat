@@ -17,16 +17,16 @@ Chrome Web Store 分配的正式扩展 ID 为 `hkifhagmdbdpaihdmllddcingebfpjmm`
 ## 1. 构建 Host
 
 ```bash
-cd grok-sidechat/host-rs
+cd sidechat/host-rs
 cargo test
-cargo build --release --bin grok-sidechat-host
+cargo build --release --bin sidechat-host
 ```
 
 ## 2. 加载扩展（开发者模式）
 
 1. 打开 `chrome://extensions`
 2. 开启 **开发者模式**
-3. **加载已解压的扩展程序** → 选择 `grok-sidechat/extension`
+3. **加载已解压的扩展程序** → 选择 `sidechat/extension`
 4. 确认扩展 ID：加载已解压扩展为 `gjpmflfaadhcbbcckbmbccggfpbdjdel`（由 manifest `key` 固定）；从商店安装则为 `hkifhagmdbdpaihdmllddcingebfpjmm`
 
 ## 3. 注册 Native Messaging Host
@@ -34,14 +34,14 @@ cargo build --release --bin grok-sidechat-host
 在仓库根目录执行（可省略 `EXTENSION_ID`，默认使用商店正式 ID）：
 
 ```bash
-cd grok-sidechat
+cd sidechat
 ./scripts/install-native-host.sh
 ```
 
 脚本会：
 
-- `cargo build --release` 得到 `host-rs/target/release/grok-sidechat-host`（绝对路径写入 manifest）
-- 写入 `com.hzy9738.grok_sidechat.json` 到：
+- `cargo build --release` 得到 `host-rs/target/release/sidechat-host`（绝对路径写入 manifest）
+- 写入 `com.hzy9738.sidechat.json` 到：
   - macOS: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`
   - 以及已存在的 Chromium / Chrome Canary 目录
 - `allowed_origins` 为 `chrome-extension://<ID>/`
@@ -51,8 +51,8 @@ cd grok-sidechat
 按顺序检查：
 
 1. 已运行 `./scripts/install-native-host.sh`
-2. 文件存在：`~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.hzy9738.grok_sidechat.json`
-3. JSON 内 `name` 为 `com.hzy9738.grok_sidechat`，`path` 为**绝对路径**且该二进制可执行
+2. 文件存在：`~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.hzy9738.sidechat.json`
+3. JSON 内 `name` 为 `com.hzy9738.sidechat`，`path` 为**绝对路径**且该二进制可执行
 4. `allowed_origins` 与扩展 ID 一致（含尾部 `/`）
 5. 在 `chrome://extensions` **重新加载**扩展；必要时完全退出 Chrome 再开
 
@@ -82,8 +82,8 @@ cd grok-sidechat
 ```bash
 cd host-rs
 cargo test
-cargo build --release --bin grok-sidechat-host
-./target/release/grok-sidechat-host --mode once --dry-run
+cargo build --release --bin sidechat-host
+./target/release/sidechat-host --mode once --dry-run
 ```
 
 扩展纯逻辑：

@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $HostBinary) {
-  $HostBinary = Join-Path $Root "host-rs\target\x86_64-pc-windows-msvc\release\grok-sidechat-host.exe"
+  $HostBinary = Join-Path $Root "host-rs\target\x86_64-pc-windows-msvc\release\sidechat-host.exe"
 }
 if (-not $HostConfig) {
   $HostConfig = Join-Path $Root ".secrets\host-config.json"

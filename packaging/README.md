@@ -41,7 +41,7 @@ CI 构建从仓库 Secret `HOST_CONFIG_JSON` 注入同样内容（Settings → S
 ## macOS
 
 ```bash
-cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host
+cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host
 APP_VERSION=0.6.3 \
 EXTENSION_ID=hkifhagmdbdpaihdmllddcingebfpjmm \
 EXTENSION_UPDATE_URL=https://clients2.google.com/service/update2/crx \
@@ -70,7 +70,7 @@ packaging/macos/build-pkg.sh
 Windows 构建机需要 Rust MSVC 工具链与 Inno Setup 6：
 
 ```powershell
-cargo build --release --manifest-path host-rs/Cargo.toml --bin grok-sidechat-host
+cargo build --release --manifest-path host-rs/Cargo.toml --bin sidechat-host
 ./packaging/windows/build-installer.ps1 -AppVersion 0.6.3
 ```
 
