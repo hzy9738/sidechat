@@ -32,7 +32,7 @@ jobs:
         run: npm test
       - name: Inject runtime config
         env:
-          RUNTIME_CONFIG_JSON: ${{ secrets.RUNTIME_CONFIG_JSON || secrets.HOST_CONFIG_JSON }}
+          RUNTIME_CONFIG_JSON: ${{ secrets.RUNTIME_CONFIG_JSON }}
         run: |
           if [ -n "${RUNTIME_CONFIG_JSON:-}" ]; then
             mkdir -p .secrets
