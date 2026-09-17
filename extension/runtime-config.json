@@ -1,0 +1,6 @@
+{
+  "apiBase": "",
+  "apiKey": "",
+  "model": "deepseek-v4",
+  "visionModel": "qwen-vl"
+}

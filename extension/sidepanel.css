@@ -137,15 +137,6 @@ button, textarea, input, select { font: inherit; color: inherit; }
 }
 .icon-btn.sm { width: 28px; height: 28px; font-size: 12px; }
 .icon-btn:hover { background: var(--accent-soft); color: var(--accent); }
-.host-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-  margin-right: 6px;
-}
-.host-dot.ok { background: var(--ok); }
-.host-dot.bad { background: var(--danger); }
 
 /* Feed — ChatGPT-like vertical rhythm */
 .feed-wrap {

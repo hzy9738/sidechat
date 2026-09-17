@@ -1,10 +1,16 @@
 /**
- * Background service worker: side panel, page context, and native host bridge.
- * Chat path: native messaging → local host → OpenAI-compatible Chat Completions.
+ * Background service worker: side panel, page context, and direct API client.
+ * Chat path: extension service worker → OpenAI-compatible Chat Completions.
  */
 
 import { localPathHintFromURL } from "./lib/context.js";
-import { formatNativeHostError, normalizeHostPingResult } from "./lib/host-bridge.js";
+import {
+  buildChatMessages,
+  resolveApiConfig,
+  streamChat,
+  transcribeAudio,
+} from "./lib/api-client.js";
+import { createSessionRepository } from "./lib/browser-sessions.js";
 import {
   DEBUG_CONSOLE_LIMIT,
   DEBUG_NETWORK_LIMIT,
@@ -24,15 +30,13 @@ import {
   updateScopeRecord,
 } from "./lib/page-scope.js";
 
-const NATIVE_HOST = "com.hzy9738.sidechat";
-const DEFAULT_MODEL = "";
-
 const PENDING_ASK_KEY = "pendingAsk";
 const DEBUG_PROTOCOL_VERSION = "1.3";
 
 /** @type {Map<number, {tabId:number,url:string,startedAt:number,lastEventAt:number,network:any[],console:any[],requests:Map<string, any>}>} */
 const debugCaptures = new Map();
 const debugStatusTimers = new Map();
+const sessionRepository = createSessionRepository(chrome.storage.local);
 
 function debugTarget(tabId) {
   return { tabId: Number(tabId) };
@@ -557,7 +561,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
-  if (msg?.type === "host-send") {
+  if (msg?.type === "assistant-send") {
     const payload = msg.payload || {};
     if (payload.sessionId && payload.requestId) {
       broadcastToSidepanels({
@@ -567,7 +571,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         text: payload.text || "",
       }, payload.browser?.tabId);
     }
-    hostSend(payload)
+    sendAssistant(payload)
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
@@ -576,7 +580,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "quick-card-send") {
     sendQuickCardTurn(msg, sender)
       .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ ok: false, error: formatNativeHostError(String(err)) }));
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;
   }
 
@@ -587,47 +591,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === "host-cancel") {
-    hostCancel(msg.requestId)
-      .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ ok: false, error: String(err) }));
-    return true;
-  }
-
-  if (msg?.type === "host-ping") {
-    hostPing()
+  if (msg?.type === "assistant-cancel") {
+    cancelAssistant(msg.requestId)
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
   if (msg?.type === "transcribe-audio") {
-    hostRpc(
-      "transcribe_audio",
-      {
-        mediaData: msg.mediaData || "",
-        mimeType: msg.mimeType || "audio/webm",
-        fileName: msg.fileName || "recording.webm",
-        apiBase: msg.apiBase || "",
-        apiKey: msg.apiKey || "",
-      },
-      120000
-    )
-      .then((result) => sendResponse({ ok: true, text: result.text || "" }))
-      .catch((err) => sendResponse({ ok: false, error: String(err) }));
-    return true;
-  }
-
-  if (msg?.type === "extract-pdf") {
-    hostRpc("extract_pdf", { mediaData: msg.mediaData || "" }, 30000)
-      .then((result) => sendResponse({ ok: true, text: result.text || "" }))
+    transcribeFromMessage(msg)
+      .then((text) => sendResponse({ ok: true, text }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
 
   if (msg?.type === "list-sessions") {
-    hostListSessions(msg.query || "", msg.limit || 40)
-      .then((result) => sendResponse(result))
+    sessionRepository.list(msg.query || "", msg.limit || 40)
+      .then((sessions) => sendResponse({ ok: true, sessions }))
       .catch((err) => sendResponse({ ok: false, error: String(err), sessions: [] }));
     return true;
   }
@@ -707,8 +687,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === "get-session") {
-    hostGetSession(msg.sessionId || "", msg.limit || 80)
-      .then((result) => sendResponse(result))
+    sessionRepository.get(msg.sessionId || "", msg.limit || 80)
+      .then((result) => sendResponse({
+        ok: true,
+        sessionId: result.info.id,
+        session: result.info,
+        messages: result.messages,
+      }))
       .catch((err) => sendResponse({ ok: false, error: String(err), messages: [] }));
     return true;
   }
@@ -761,7 +746,7 @@ async function sendQuickCardTurn(msg, sender) {
     }
   }
 
-  const prefs = await chrome.storage.local.get(["cwd", "apiBase", "apiKey", "apiModel"]);
+  const prefs = await chrome.storage.local.get(["cwd", "apiBase", "apiKey", "apiModel", "visionModel"]);
   const requestId = String(msg.requestId || `card-${Date.now()}`);
   const payload = {
     requestId,
@@ -771,12 +756,13 @@ async function sendQuickCardTurn(msg, sender) {
     apiBase: prefs.apiBase || "",
     apiKey: prefs.apiKey || "",
     model: prefs.apiModel || "",
+    visionModel: prefs.visionModel || "",
     text,
     browser,
     reasoningEffort: "high",
     dryRun: false,
   };
-  const result = await hostSend(payload);
+  const result = await sendAssistant(payload);
   if (result?.sessionId) await bindSessionToScope(pageScope, result.sessionId);
   return result;
 }
@@ -878,25 +864,15 @@ function extractPagePayload() {
 
   return { title, selection, pageText };
 }
+// ---------- Direct API client ----------
 
-// ---------- Native host ----------
-
-/** @type {chrome.runtime.Port|null} */
-let nativePort = null;
-/** Last connectNative / disconnect error (e.g. host not found). */
-let lastNativeError = "";
-/** @type {Map<string, {events: any[], resolve: Function, reject: Function, done?: boolean}>} */
+/** @type {Map<string, {events:any[], tabId:number, controller:AbortController, cancelled?:boolean}>} */
 const pending = new Map();
-/** One-shot RPC waiters for list_sessions / get_session / etc. */
-/** @type {Map<string, {resolve: Function, reject: Function, op: string}>} */
-const rpcPending = new Map();
-/** @type {Set<(err: string) => void>} */
-const disconnectWaiters = new Set();
-/** Side panel long-lived ports for reliable stream delivery (sendMessage can drop). */
-/** @type {Set<chrome.runtime.Port>} */
+/** Side panel long-lived ports for reliable stream delivery. */
 const sidepanelPorts = new Set();
 /** @type {Map<chrome.runtime.Port, number>} */
 const quickCardPorts = new Map();
+let bundledConfigPromise = null;
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "sidepanel") {
@@ -918,9 +894,8 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 /**
- * Push event to open side panels.
- * Prefer Port only when connected — do NOT also sendMessage (that double-renders
- * every thinking/text delta as "TheThe user user…").
+ * Push an event to open side panels and quick cards.
+ * Prefer Port when connected; the runtime fallback avoids duplicate deltas.
  */
 function broadcastToSidepanels(message, tabId = null) {
   let delivered = 0;
@@ -941,265 +916,44 @@ function broadcastToSidepanels(message, tabId = null) {
       quickCardPorts.delete(port);
     }
   }
-  // Fallback only when no live Port (e.g. side panel not yet connected).
-  if (delivered === 0) {
-    chrome.runtime.sendMessage(message).catch(() => {});
+  if (delivered === 0) chrome.runtime.sendMessage(message).catch(() => {});
+}
+
+function loadBundledConfig() {
+  if (!bundledConfigPromise) {
+    bundledConfigPromise = fetch(chrome.runtime.getURL("runtime-config.json"))
+      .then((response) => (response.ok ? response.json() : {}))
+      .catch(() => ({}));
   }
+  return bundledConfigPromise;
 }
 
-async function handleHostBrowserAction(message) {
-  const response = {
-    ok: false,
-    action: message.action || "action",
-    error: "model tools are disabled",
-  };
-
-  try {
-    ensureNativePort().postMessage({
-      op: "browser_result",
-      requestId: message.requestId || "",
-      callId: message.callId || "",
-      ok: !!response.ok,
-      result: response,
-      error: response.error || "",
-    });
-  } catch {
-    // The host process owns cancellation/disconnect handling.
-  }
+async function loadApiConfig(payload = {}, hasImages = false) {
+  const [stored, bundled] = await Promise.all([
+    chrome.storage.local.get(["apiBase", "apiKey", "apiModel", "visionModel"]),
+    loadBundledConfig(),
+  ]);
+  return resolveApiConfig(payload, stored, bundled, hasImages);
 }
 
-function ensureNativePort() {
-  if (nativePort) return nativePort;
-  lastNativeError = "";
-  nativePort = chrome.runtime.connectNative(NATIVE_HOST);
-  // connectNative 失败时 lastError 往往在同步后立刻可读
-  const connectErr = chrome.runtime.lastError?.message;
-  if (connectErr) {
-    lastNativeError = connectErr;
-    nativePort = null;
-    throw new Error(connectErr);
-  }
-
-  nativePort.onMessage.addListener((msg) => {
-    const reqId = msg.requestId || msg.request_id;
-    if (msg.op === "hello" || msg.op === "pong") {
-      broadcastToSidepanels({ type: "host-status", msg });
-    }
-    if (msg.op === "browser_action" && reqId && msg.callId) {
-      handleHostBrowserAction(msg).catch(() => {});
-      return;
-    }
-    // One-shot RPC responses.
-    if (reqId && rpcPending.has(reqId)) {
-      const r = rpcPending.get(reqId);
-      if (msg.op !== r.op && msg.op !== "error") return;
-      rpcPending.delete(reqId);
-      if (msg.op === "error" || msg.ok === false) {
-        r.reject(new Error(msg.error || "host rpc error"));
-      } else {
-        r.resolve(msg);
-      }
-      return;
-    }
-    if (msg.op === "event" && reqId && pending.has(reqId)) {
-      const p = pending.get(reqId);
-      p.events.push(msg.event);
-      broadcastToSidepanels({
-        type: "host-event",
-        requestId: reqId,
-        event: msg.event,
-        sessionId: msg.sessionId,
-      }, p.tabId);
-    }
-    if (msg.op === "send_done" && reqId && pending.has(reqId)) {
-      const p = pending.get(reqId);
-      p.done = true;
-      const result = {
-        ok: !!msg.ok,
-        error: msg.error,
-        sessionId: msg.sessionId,
-        argv: msg.argv,
-        prompt: msg.prompt,
-        events: p.events,
-        info: msg.info,
-      };
-      broadcastToSidepanels({
-        type: "host-done",
-        requestId: reqId,
-        ...result,
-      }, p.tabId);
-      p.resolve(result);
-      pending.delete(reqId);
-    }
-    if (msg.op === "cancelled" && reqId) {
-      const p = pending.get(reqId);
-      broadcastToSidepanels({ type: "host-cancelled", requestId: reqId }, p?.tabId);
-    }
-    if (msg.op === "error" && reqId && pending.has(reqId)) {
-      const p = pending.get(reqId);
-      const error = msg.error || "host error";
-      broadcastToSidepanels({
-        type: "host-done",
-        requestId: reqId,
-        ok: false,
-        error,
-        events: p.events,
-      }, p.tabId);
-      p.reject(new Error(error));
-      pending.delete(reqId);
-    }
-  });
-  nativePort.onDisconnect.addListener(() => {
-    const err =
-      chrome.runtime.lastError?.message || lastNativeError || "native host disconnected";
-    lastNativeError = err;
-    for (const [id, p] of pending) {
-      broadcastToSidepanels({
-        type: "host-done",
-        requestId: id,
-        ok: false,
-        error: err,
-        events: p.events,
-      }, p.tabId);
-      p.reject(new Error(err));
-      pending.delete(id);
-    }
-    for (const [id, p] of rpcPending) {
-      p.reject(new Error(err));
-      rpcPending.delete(id);
-    }
-    for (const w of disconnectWaiters) {
-      try {
-        w(err);
-      } catch {
-        /* ignore */
-      }
-    }
-    disconnectWaiters.clear();
-    nativePort = null;
-  });
-  return nativePort;
+function createSessionId() {
+  const random = globalThis.crypto?.randomUUID?.().slice(0, 8) || Math.random().toString(16).slice(2, 10);
+  return `sc-${Date.now()}-${random}`;
 }
 
-/**
- * 通用 request/response RPC（list_sessions / get_session）。
- * @param {string} op
- * @param {object} fields
- * @param {number} [timeoutMs]
- */
-function hostRpc(op, fields = {}, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    let port;
-    try {
-      port = ensureNativePort();
-    } catch (e) {
-      reject(e);
-      return;
-    }
-    const requestId = `${op}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const timer = setTimeout(() => {
-      if (rpcPending.has(requestId)) {
-        rpcPending.delete(requestId);
-        reject(new Error(`${op} timed out`));
-      }
-    }, timeoutMs);
-    rpcPending.set(requestId, {
-      op,
-      resolve: (msg) => {
-        clearTimeout(timer);
-        resolve(msg);
-      },
-      reject: (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    });
-    try {
-      port.postMessage({ op, requestId, ...fields });
-    } catch (e) {
-      clearTimeout(timer);
-      rpcPending.delete(requestId);
-      reject(e);
-    }
-  });
+function emitAssistantEvent(requestId, event, sessionId, tabId) {
+  const request = pending.get(requestId);
+  if (!request) return;
+  request.events.push(event);
+  broadcastToSidepanels({
+    type: "assistant-event",
+    requestId,
+    event,
+    sessionId,
+  }, tabId);
 }
 
-function hostListSessions(query, limit) {
-  return hostRpc("list_sessions", { query: query || "", limit: limit || 40 }).then((msg) => ({
-    ok: !!msg.ok,
-    sessions: Array.isArray(msg.sessions) ? msg.sessions : [],
-    error: msg.error,
-  }));
-}
-
-function hostGetSession(sessionId, limit) {
-  return hostRpc("get_session", { sessionId: sessionId || "", limit: limit || 80 }).then((msg) => ({
-    ok: !!msg.ok,
-    sessionId: msg.sessionId || sessionId,
-    session: msg.session || null,
-    messages: Array.isArray(msg.messages) ? msg.messages : [],
-    error: msg.error,
-  }));
-}
-
-function hostPing() {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (info) => {
-      if (settled) return;
-      settled = true;
-      resolve(normalizeHostPingResult(info));
-    };
-
-    let port;
-    try {
-      port = ensureNativePort();
-    } catch (e) {
-      finish({ lastError: String(e?.message || e), disconnected: true });
-      return;
-    }
-
-    // 若 connect 后立刻断开（host not found），Chrome 异步触发 onDisconnect
-    const onDisconnectWait = (err) => {
-      finish({ lastError: err || lastNativeError, disconnected: true });
-    };
-    disconnectWaiters.add(onDisconnectWait);
-
-    const requestId = `ping-${Date.now()}`;
-    const onMsg = (msg) => {
-      if (msg.op === "pong" || msg.op === "hello") {
-        port.onMessage.removeListener(onMsg);
-        disconnectWaiters.delete(onDisconnectWait);
-        finish({ version: msg.version, msg });
-      }
-    };
-    port.onMessage.addListener(onMsg);
-
-    try {
-      port.postMessage({ op: "ping", requestId });
-    } catch (e) {
-      port.onMessage.removeListener(onMsg);
-      disconnectWaiters.delete(onDisconnectWait);
-      finish({ lastError: String(e?.message || e), disconnected: true });
-      return;
-    }
-
-    // 超时不得 ok:true — host 缺失时用户会看到 not found
-    setTimeout(() => {
-      port.onMessage.removeListener(onMsg);
-      disconnectWaiters.delete(onDisconnectWait);
-      if (settled) return;
-      const err = lastNativeError || chrome.runtime.lastError?.message || "";
-      if (err) {
-        finish({ lastError: err, disconnected: true, timedOut: true });
-      } else {
-        finish({ timedOut: true });
-      }
-    }, 1500);
-  });
-}
-
-async function hostSend(payload) {
+async function validatePageScope(payload) {
   const browser = payload?.browser || {};
   const query =
     browser.windowId != null
@@ -1218,62 +972,142 @@ async function hostSend(payload) {
   if (payload.sessionId && !scopeRecord.sessionIds.includes(payload.sessionId)) {
     throw new Error("该会话不属于当前网页，已阻止跨网页续聊。");
   }
-
-  return new Promise((resolve, reject) => {
-    try {
-      const port = ensureNativePort();
-      const requestId = payload.requestId || `send-${Date.now()}`;
-      const { enableBrowserControl: _ignoredBrowserControl, ...safeBrowser } = browser;
-      const existingMentions = Array.isArray(safeBrowser.mentions)
-        ? safeBrowser.mentions.slice()
-        : [];
-      const hasDebugSnapshot = existingMentions.some((mention) => mention?.kind === "debug");
-      const capture = debugCaptures.get(Number(browser.tabId));
-      if (capture && !hasDebugSnapshot && isDebugQuestion(payload.text || "")) {
-        existingMentions.push({
-          kind: "debug",
-          title: `自动附加调试快照（${capture.network.length} 个请求，${capture.console.length} 条控制台信息）`,
-          text: formatDebugSnapshot(capture),
-        });
-        safeBrowser.mentions = existingMentions;
-      }
-      pending.set(requestId, {
-        events: [],
-        resolve,
-        reject,
-        tabId: browser.tabId,
-      });
-      chrome.storage.local.set({ browserControl: false }).catch(() => {});
-      port.postMessage({
-        op: "send",
-        requestId,
-        sessionId: payload.sessionId || "",
-        cwd: payload.cwd || "",
-        text: payload.text || "",
-        browser: safeBrowser,
-        model: payload.model || DEFAULT_MODEL,
-        apiBase: payload.apiBase || "",
-        apiKey: payload.apiKey || "",
-        mode: "default",
-        reasoningEffort: payload.reasoningEffort || "high",
-        maxTurns: 1,
-        alwaysApprove: false,
-        dryRun: !!payload.dryRun,
-      });
-    } catch (e) {
-      reject(e);
-    }
-  });
 }
 
-function hostCancel(requestId) {
-  return new Promise((resolve, reject) => {
-    try {
-      const port = ensureNativePort();
-      port.postMessage({ op: "cancel", requestId: requestId || "" });
-      resolve({ ok: true });
-    } catch (e) {
-      reject(e);
+async function sendAssistant(payload) {
+  await validatePageScope(payload);
+  const browser = payload?.browser || {};
+  const requestId = String(payload.requestId || `send-${Date.now()}`);
+  const sessionId = payload.dryRun
+    ? `dry-session-${Date.now()}`
+    : String(payload.sessionId || "").trim() || createSessionId();
+  const { enableBrowserControl: _ignoredBrowserControl, ...safeBrowser } = browser;
+  const existingMentions = Array.isArray(safeBrowser.mentions)
+    ? safeBrowser.mentions.slice()
+    : [];
+  const hasDebugSnapshot = existingMentions.some((mention) => mention?.kind === "debug");
+  if (!hasDebugSnapshot && isDebugQuestion(payload.text || "")) {
+    const prepared = await prepareDebugSnapshot(browser.tabId);
+    existingMentions.push({
+      kind: "debug",
+      title: `自动附加调试快照（${prepared.status.networkCount} 个请求，${prepared.status.consoleCount} 条控制台信息）`,
+      text: prepared.snapshot,
+    });
+    safeBrowser.mentions = existingMentions;
+  }
+
+  const controller = new AbortController();
+  pending.set(requestId, {
+    events: [],
+    tabId: Number(browser.tabId),
+    controller,
+    cancelled: false,
+  });
+  emitAssistantEvent(requestId, { type: "session", sessionId }, sessionId, browser.tabId);
+
+  if (payload.dryRun) {
+    emitAssistantEvent(requestId, { type: "text", text: "dry-run ok" }, sessionId, browser.tabId);
+    const events = pending.get(requestId)?.events.slice() || [];
+    const result = { ok: true, sessionId, events };
+    broadcastToSidepanels({ type: "assistant-done", requestId, ...result }, browser.tabId);
+    pending.delete(requestId);
+    return result;
+  }
+
+  const hasImages = Array.isArray(safeBrowser.images) && safeBrowser.images.length > 0;
+  const [config, history] = await Promise.all([
+    loadApiConfig(payload, hasImages),
+    sessionRepository.history(payload.sessionId || ""),
+  ]);
+  const messages = buildChatMessages(safeBrowser, payload.text || "", history);
+  let assistant = "";
+  let thinking = "";
+
+  try {
+    const result = await streamChat({
+      config,
+      messages,
+      signal: controller.signal,
+      onDelta(type, text) {
+        if (!text) return;
+        if (type === "thinking") thinking += text;
+        else assistant += text;
+        emitAssistantEvent(
+          requestId,
+          type === "thinking"
+            ? { type: "thinking", text }
+            : { type: "partial", rawType: "assistant", text },
+          sessionId,
+          browser.tabId
+        );
+      },
+    });
+    assistant = result.assistant;
+    thinking = result.thinking;
+    await sessionRepository.appendTurn(sessionId, {
+      cwd: payload.cwd || "",
+      model: config.model,
+      user: payload.text || "",
+      assistant,
+      thinking,
+    });
+    const events = pending.get(requestId)?.events.slice() || [];
+    const response = { ok: true, sessionId, events };
+    broadcastToSidepanels({ type: "assistant-done", requestId, ...response }, browser.tabId);
+    return response;
+  } catch (error) {
+    if (error?.name === "AbortError" || controller.signal.aborted) {
+      const request = pending.get(requestId);
+      if (assistant || thinking) {
+        await sessionRepository.appendTurn(sessionId, {
+          cwd: payload.cwd || "",
+          model: config.model,
+          user: payload.text || "",
+          assistant,
+          thinking,
+        }).catch(() => {});
+      }
+      if (!request?.cancelled) {
+        broadcastToSidepanels({ type: "assistant-cancelled", requestId }, browser.tabId);
+      }
+      return {
+        ok: false,
+        cancelled: true,
+        sessionId,
+        events: request?.events.slice() || [],
+      };
     }
+    const message = String(error?.message || error);
+    const events = pending.get(requestId)?.events.slice() || [];
+    const response = { ok: false, error: message, sessionId, events };
+    broadcastToSidepanels({ type: "assistant-done", requestId, ...response }, browser.tabId);
+    return response;
+  } finally {
+    pending.delete(requestId);
+  }
+}
+
+async function cancelAssistant(requestId) {
+  const request = pending.get(String(requestId || ""));
+  if (!request) return { ok: true, active: false };
+  request.cancelled = true;
+  request.controller.abort();
+  broadcastToSidepanels({
+    type: "assistant-cancelled",
+    requestId: String(requestId || ""),
+  }, request.tabId);
+  return { ok: true, active: true };
+}
+
+async function transcribeFromMessage(message) {
+  const config = await loadApiConfig({
+    apiBase: message.apiBase || "",
+    apiKey: message.apiKey || "",
+  });
+  return transcribeAudio({
+    config,
+    dataUrl: message.mediaData || "",
+    mimeType: message.mimeType || "audio/webm",
+    fileName: message.fileName || "recording.webm",
   });
 }

@@ -45,7 +45,6 @@
           <div class="topbar-title" id="thread-title">新聊天</div>
         </div>
         <div class="topbar-right">
-          <span id="host-dot" class="host-dot unknown" title="Native host" role="status" aria-label="Native host 状态未知"></span>
           <button type="button" id="btn-new" class="icon-btn" title="新聊天" aria-label="新聊天">＋</button>
         </div>
       </header>
@@ -105,7 +104,7 @@
               <input type="text" id="cwd" placeholder="可选，只记在会话上" autocomplete="off" />
             </label>
             <p class="set-note">会话 <code id="session-id">新</code></p>
-            <p class="set-note">默认走公司私有化接口（Rust Host 内加密）。设置项仅作覆盖。</p>
+            <p class="set-note">默认走公司私有化接口。纯扩展模式下，随包配置对本机用户可读取；设置项仅作覆盖。</p>
           </div>
 
           <div id="attach-menu" class="popover attach-menu" role="menu" aria-label="附加上下文" hidden>

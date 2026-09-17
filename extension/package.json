@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "vendor:pdf": "node scripts/vendor-pdf.mjs",
+    "postinstall": "npm run vendor:pdf",
     "test": "node test/run-tests.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289"
   }
 }

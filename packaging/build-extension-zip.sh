@@ -10,7 +10,7 @@ cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 mkdir -p "$WORK_DIR/extension" "$OUTPUT_DIR"
-for item in background.js content.css content.js manifest.json quick-card.js sidepanel.css sidepanel.html sidepanel.js icons lib; do
+for item in background.js content.css content.js manifest.json quick-card.js sidepanel.css sidepanel.html sidepanel.js runtime-config.json icons lib vendor; do
   cp -R "$ROOT/extension/$item" "$WORK_DIR/extension/"
 done
 

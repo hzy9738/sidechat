@@ -1,13 +1,12 @@
 /**
- * 安能助手侧栏 UI → native host → OpenAI-compatible Chat Completions.
+ * 安能助手侧栏 UI → service worker → OpenAI-compatible Chat Completions.
  * 主路径：干净对话；设置 / 调试噪音默认收起。
  */
 import { renderMarkdown, bindCopyButtons } from "./lib/markdown.js";
 import { packBrowserContext, stripMentionTokens, localPathHintFromURL } from "./lib/context.js";
 import { titleFromUserText } from "./lib/threads.js";
-import { mapHostEventToUI } from "./lib/events.js";
+import { mapAssistantEventToUI } from "./lib/events.js";
 import { isDebugQuestion } from "./lib/debug-capture.js";
-import { formatNativeHostError, isNativeHostMissingError } from "./lib/host-bridge.js";
 import {
   PAGE_SCOPE_STORE_KEY,
   DEFAULT_THREAD_TITLE,
@@ -62,16 +61,6 @@ function hideEmpty() {
 /** 空态用蓝白字标，不用官网按钮 Logo。 */
 function emptyStateHTML() {
   return `<div class="empty-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="32" height="32" rx="8" fill="#2161D7"/><path d="M8 12.5A2.5 2.5 0 0 1 10.5 10h11A2.5 2.5 0 0 1 24 12.5v7a2.5 2.5 0 0 1-2.5 2.5H16l-3.2 2.4a.8.8 0 0 1-1.3-.6V22H10.5A2.5 2.5 0 0 1 8 19.5v-7Z" fill="#fff"/><circle cx="24.5" cy="8.5" r="3.2" fill="#61C7F2"/></svg></div><p>你好，我是安能助手</p><p class="hint">可以提问，也可以录音、识图或读取 PDF</p>`;
-}
-
-function setHostStatus(ok, title) {
-  const el = $("host-dot");
-  el.className = `host-dot ${ok === true ? "ok" : ok === false ? "bad" : "unknown"}`;
-  el.title = title || (ok ? "host ok" : "host issue");
-  el.setAttribute(
-    "aria-label",
-    ok === true ? "Native host 已连接" : ok === false ? "Native host 未连接" : "Native host 状态未知"
-  );
 }
 
 function setBusy(busy) {
@@ -284,18 +273,9 @@ function appendThinking(text) {
 }
 
 function appendError(text) {
-  const hostMissing =
-    isNativeHostMissingError(text) || String(text || "").includes("仅复制 extension 文件夹不能运行");
-  text = formatNativeHostError(text);
+  text = String(text || "请求失败");
   hideEmpty();
   const log = $("log");
-  if (
-    hostMissing &&
-    [...log.querySelectorAll(".err-banner")].some((banner) => banner.textContent === text)
-  ) {
-    scrollLog();
-    return;
-  }
   const last = log.lastElementChild;
   if (last?.classList?.contains("err-banner") && last.textContent === text) {
     scrollLog();
@@ -375,8 +355,8 @@ function applySessionId(id, expectedScope = state.scopeKey) {
   renderSessionList();
 }
 
-function handleHostEvent(event) {
-  const cmds = mapHostEventToUI(event);
+function handleAssistantEvent(event) {
+  const cmds = mapAssistantEventToUI(event);
   for (const cmd of cmds) {
     switch (cmd.kind) {
       case "hidden":
@@ -405,14 +385,14 @@ function handleHostEvent(event) {
 /** 统一处理 background → sidepanel 消息（Port 与 runtime 双通道）。 */
 function onBackgroundMessage(msg) {
   if (!msg || typeof msg !== "object") return;
-  if (msg.type === "host-event") {
+  if (msg.type === "assistant-event") {
     // 只接收当前页面当前 turn 的事件，避免切页后旧流继续写入新页面。
     if (!state.requestId || msg.requestId !== state.requestId) return;
     if (msg.sessionId) applySessionId(msg.sessionId);
-    if (msg.event) handleHostEvent(msg.event);
+    if (msg.event) handleAssistantEvent(msg.event);
     return;
   }
-  if (msg.type === "host-done") {
+  if (msg.type === "assistant-done") {
     if (!state.requestId || msg.requestId !== state.requestId) return;
     if (msg.sessionId) applySessionId(msg.sessionId);
     replayEventsIfNeeded(msg.events || []);
@@ -422,15 +402,11 @@ function onBackgroundMessage(msg) {
     state.assistantEl = null;
     return;
   }
-  if (msg.type === "host-cancelled") {
+  if (msg.type === "assistant-cancelled") {
     if (!state.requestId || msg.requestId !== state.requestId) return;
     state.requestId = "";
     setBusy(false);
     state.assistantEl = null;
-    return;
-  }
-  if (msg.type === "host-status") {
-    setHostStatus(true, `host ${msg.msg?.version || "ok"}`);
     return;
   }
   if (msg.type === "active-page-changed" && msg.page) {
@@ -525,7 +501,7 @@ function assistantTextFromEvents(events) {
     if (event?.type === "text") text += event.text || "";
     else if (
       event?.type === "partial" &&
-      !/thinking|host\.argv|stderr/i.test(String(event.rawType || ""))
+      !/thinking|stderr/i.test(String(event.rawType || ""))
     ) {
       text += event.text || "";
     }
@@ -618,7 +594,7 @@ function connectSidepanelPort() {
 connectSidepanelPort();
 
 /**
- * send_done 后仅当 live 完全没收到对应内容时，用 batch events 补一次。
+ * 完成事件后仅当 live 完全没收到对应内容时，用 batch events 补一次。
  * 有任何 live 字符就不再 replay，避免与 Port 流叠成「TheThe user user」。
  * @param {any[]} events
  */
@@ -637,7 +613,6 @@ function replayEventsIfNeeded(events) {
     else if (ev.type === "text") text += ev.text || "";
     else if (
       ev.type === "partial" &&
-      ev.rawType !== "host.argv" &&
       ev.rawType !== "stderr" &&
       !/thinking/i.test(String(ev.rawType || ""))
     ) {
@@ -662,7 +637,7 @@ function replayEventsIfNeeded(events) {
 async function forceUnlock(reason) {
   if (state.requestId) {
     try {
-      await chrome.runtime.sendMessage({ type: "host-cancel", requestId: state.requestId });
+      await chrome.runtime.sendMessage({ type: "assistant-cancel", requestId: state.requestId });
     } catch {
       /* ignore */
     }
@@ -696,6 +671,34 @@ function fileToDataURL(file) {
     reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
     reader.readAsDataURL(file);
   });
+}
+
+let pdfModulePromise = null;
+
+async function extractPdfText(file) {
+  if (!pdfModulePromise) pdfModulePromise = import("./vendor/pdf.mjs");
+  const pdfjs = await pdfModulePromise;
+  pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdf.worker.mjs");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const document = await pdfjs.getDocument({ data: bytes }).promise;
+  const pages = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) => String(item?.str || ""))
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) pages.push(`第 ${pageNumber} 页\n${text}`);
+    }
+  } finally {
+    await document.destroy();
+  }
+  const text = pages.join("\n\n").slice(0, 120_000).trim();
+  if (!text) throw new Error("未从 PDF 中提取到文字；扫描件请先使用识图功能。");
+  return text;
 }
 
 async function stopRecording() {
@@ -803,10 +806,8 @@ $("pdf-file")?.addEventListener("change", async (event) => {
   }
   try {
     setMediaStatus("正在读取 PDF…");
-    const mediaData = await fileToDataURL(file);
-    const response = await chrome.runtime.sendMessage({ type: "extract-pdf", mediaData });
-    if (!response?.ok) throw new Error(response?.error || "PDF 读取失败");
-    addChip({ kind: "document", title: file.name, text: response.text || "" });
+    const text = await extractPdfText(file);
+    addChip({ kind: "document", title: file.name, text });
     const input = $("input");
     if (!input.value.trim()) input.value = "请总结这份 PDF，并列出关键信息。";
     autosizeInput();
@@ -1114,7 +1115,7 @@ async function loadSessions(query) {
     if (loadToken !== state.sessionLoadToken) return;
     if (!res?.ok) {
       state.sessions = [];
-      if (status) status.textContent = res?.error || "无法加载会话（检查 native host）";
+      if (status) status.textContent = res?.error || "无法加载会话";
       renderSessionList();
       return;
     }
@@ -1354,7 +1355,7 @@ $("btn-cancel").addEventListener("click", async () => {
   $("btn-cancel").disabled = true;
   $("turn-status").textContent = "正在停止…";
   try {
-    await chrome.runtime.sendMessage({ type: "host-cancel", requestId: state.requestId });
+    await chrome.runtime.sendMessage({ type: "assistant-cancel", requestId: state.requestId });
   } catch (e) {
     appendError(String(e));
     if (state.busy) {
@@ -1452,7 +1453,7 @@ $("btn-send").addEventListener("click", async () => {
   const requestId = `ui-${Date.now()}`;
   state.requestId = requestId;
 
-  // 安全阀：防止 host 无响应导致永远卡在「停止」
+  // 安全阀：防止请求无响应导致永远卡在「停止」
   const busyWatchdog = setTimeout(() => {
     if (state.busy && state.requestId === requestId) {
       setBusy(false);
@@ -1509,7 +1510,7 @@ $("btn-send").addEventListener("click", async () => {
       dryRun,
     };
 
-    const result = await chrome.runtime.sendMessage({ type: "host-send", payload });
+    const result = await chrome.runtime.sendMessage({ type: "assistant-send", payload });
     if (state.scopeKey !== turnScope || state.requestId !== requestId) return;
     if (result?.sessionId) applySessionId(result.sessionId, turnScope);
     if (result?.error) appendError(result.error);
@@ -1519,9 +1520,7 @@ $("btn-send").addEventListener("click", async () => {
     replayEventsIfNeeded(result?.events || []);
   } catch (e) {
     if (state.scopeKey === turnScope && state.requestId === requestId) {
-      const message = formatNativeHostError(String(e));
-      appendError(message);
-      setHostStatus(false, message);
+      appendError(String(e?.message || e));
     }
   } finally {
     clearTimeout(busyWatchdog);
@@ -1627,22 +1626,6 @@ $("btn-toggle-selection-site").addEventListener("click", async () => {
 renderChips();
 initializePageScope().catch((error) => appendError(String(error)));
 autosizeInput();
-chrome.runtime
-  .sendMessage({ type: "host-ping" })
-  .then((r) => {
-    if (r?.ok) setHostStatus(true, `host ${r.version || "ok"}`);
-    else {
-      const message = formatNativeHostError(r?.error || "host unavailable");
-      setHostStatus(false, message);
-      if (r?.error) appendError(message);
-    }
-  })
-  .catch((e) => {
-    const message = formatNativeHostError(String(e?.message || e));
-    setHostStatus(false, message);
-    appendError(message);
-  });
-
 chrome.runtime
   .sendMessage({ type: "consume-pending-ask" })
   .then((r) => {

@@ -1,9 +1,6 @@
-host/grok-sidechat-host
-host/grok-sidechat-host.exe
-host-rs/target
+extension/node_modules/
 dist/
 .secrets/
-anneng-config.json
 *.test
 .DS_Store
 __pycache__/

@@ -1,3 +1,0 @@
-{"type":"assistant","content":[{"type":"thinking","text":"Read the browser context first."}]}
-{"type":"assistant","content":[{"type":"text","text":"This page is about installing the CLI."}]}
-{"type":"result","session_id":"sample-sess-42","subtype":"success","usage":{"input_tokens":10,"output_tokens":20}}

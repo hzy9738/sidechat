@@ -347,7 +347,7 @@
 
   function resetConversation(context) {
     if (state.busy && state.requestId) {
-      chrome.runtime.sendMessage({ type: "host-cancel", requestId: state.requestId }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "assistant-cancel", requestId: state.requestId }).catch(() => {});
     }
     state.context = context || null;
     state.messages = [];
@@ -529,13 +529,13 @@
   function eventText(event) {
     if (!event || typeof event !== "object") return "";
     if (event.type === "text") return event.text || "";
-    if (event.type === "partial" && !/thinking|host\.argv|stderr/i.test(String(event.rawType || ""))) {
+    if (event.type === "partial" && !/thinking|stderr/i.test(String(event.rawType || ""))) {
       return event.text || "";
     }
     return "";
   }
 
-  function handleHostEvent(event, sessionId) {
+  function handleAssistantEvent(event, sessionId) {
     if (sessionId) state.sessionId = sessionId;
     if (event?.type === "session" && event.sessionId) state.sessionId = event.sessionId;
     if (event?.type === "thinking" || /thinking/i.test(String(event?.rawType || ""))) {
@@ -598,9 +598,9 @@
     const requestId = state.requestId;
     status.textContent = "正在停止…";
     try {
-      await chrome.runtime.sendMessage({ type: "host-cancel", requestId });
+      await chrome.runtime.sendMessage({ type: "assistant-cancel", requestId });
     } catch {
-      // The host disconnect path will also release the UI through the send promise.
+      // The request completion path also releases the UI through the send promise.
     }
   }
 
@@ -637,11 +637,11 @@
       renderAll();
       return;
     }
-    if (message.type === "host-event" && message.requestId === state.requestId) {
-      handleHostEvent(message.event, message.sessionId);
+    if (message.type === "assistant-event" && message.requestId === state.requestId) {
+      handleAssistantEvent(message.event, message.sessionId);
       return;
     }
-    if (message.type === "host-done" && message.requestId === state.requestId) {
+    if (message.type === "assistant-done" && message.requestId === state.requestId) {
       if (message.sessionId) state.sessionId = message.sessionId;
       replayIfNeeded(message.events);
       state.busy = false;
@@ -650,7 +650,7 @@
       renderAll();
       return;
     }
-    if (message.type === "host-cancelled" && message.requestId === state.requestId) {
+    if (message.type === "assistant-cancelled" && message.requestId === state.requestId) {
       state.busy = false;
       state.requestId = "";
       status.textContent = "已停止";

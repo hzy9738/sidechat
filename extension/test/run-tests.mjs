@@ -15,7 +15,7 @@ const context = await import(pathToFileURL(path.join(lib, "context.js")).href);
 const events = await import(pathToFileURL(path.join(lib, "events.js")).href);
 const threads = await import(pathToFileURL(path.join(lib, "threads.js")).href);
 const markdown = await import(pathToFileURL(path.join(lib, "markdown.js")).href);
-const hostBridge = await import(pathToFileURL(path.join(lib, "host-bridge.js")).href);
+const apiClient = await import(pathToFileURL(path.join(lib, "api-client.js")).href);
 const pageScope = await import(pathToFileURL(path.join(lib, "page-scope.js")).href);
 const debugCapture = await import(pathToFileURL(path.join(lib, "debug-capture.js")).href);
 
@@ -159,13 +159,13 @@ test("scope records retain only sessions bound to that page scope", () => {
   assert.equal(pageScope.readScopeRecord(store, scopeB).activeSessionId, "session-b");
 });
 
-test("mapHostEventToUI maps thinking/text and hides tools", () => {
-  const t = events.mapHostEventToUI({ type: "thinking", text: "..." });
+test("mapAssistantEventToUI maps thinking/text and hides tools", () => {
+  const t = events.mapAssistantEventToUI({ type: "thinking", text: "..." });
   assert.equal(t[0].kind, "thinking");
-  const a = events.mapHostEventToUI({ type: "partial", text: "hello" });
+  const a = events.mapAssistantEventToUI({ type: "partial", text: "hello" });
   assert.equal(a[0].kind, "assistant");
   assert.equal(a[0].streaming, true);
-  const tool = events.mapHostEventToUI({
+  const tool = events.mapAssistantEventToUI({
     type: "tool_use",
     name: "browser_click",
     input: '{"selector":"#go"}',
@@ -173,14 +173,14 @@ test("mapHostEventToUI maps thinking/text and hides tools", () => {
   assert.equal(tool[0].kind, "hidden");
 });
 
-test("mapHostEventToUI hides host.argv and done noise", () => {
-  const argv = events.mapHostEventToUI({
+test("mapAssistantEventToUI hides stream noise and done events", () => {
+  const argv = events.mapAssistantEventToUI({
     type: "partial",
     text: "argv: [...]",
-    rawType: "host.argv",
+    rawType: "stderr",
   });
   assert.equal(argv[0].kind, "hidden");
-  const done = events.mapHostEventToUI({ type: "done" });
+  const done = events.mapAssistantEventToUI({ type: "done" });
   assert.equal(done[0].kind, "hidden");
 });
 
@@ -192,7 +192,7 @@ test("sanitizeToolText strips binary-ish noise", () => {
 
 test("exit status tool results are hidden noise", () => {
   assert.equal(events.isNoiseToolResult("exit status 1"), true);
-  const mapped = events.mapHostEventToUI({ type: "tool_result", text: "exit status 1" });
+  const mapped = events.mapAssistantEventToUI({ type: "tool_result", text: "exit status 1" });
   assert.equal(mapped[0].kind, "hidden");
 });
 
@@ -217,41 +217,42 @@ test("stripMentionTokens", () => {
   assert.ok(!s.includes("@page"));
 });
 
-test("normalizeHostPingResult: missing host / timeout not ok", () => {
-  const missing = hostBridge.normalizeHostPingResult({
-    lastError: "Specified native messaging host not found.",
-    disconnected: true,
-  });
-  assert.equal(missing.ok, false);
-  assert.match(missing.error, /not found/i);
-
-  const timed = hostBridge.normalizeHostPingResult({ timedOut: true });
-  assert.equal(timed.ok, false);
-  assert.match(timed.error, /timed out/i);
-
-  const ok = hostBridge.normalizeHostPingResult({ version: "0.1.0", msg: { op: "pong" } });
-  assert.equal(ok.ok, true);
-  assert.equal(ok.version, "0.1.0");
-});
-
-test("isNativeHostMissingError", () => {
-  assert.equal(
-    hostBridge.isNativeHostMissingError("Specified native messaging host not found."),
-    true
+test("direct API config keeps endpoint and credentials from the same layer", () => {
+  const config = apiClient.resolveApiConfig(
+    { apiBase: "https://request.example/v1", apiKey: "request-key" },
+    { apiBase: "https://stored.example/v1", apiKey: "stored-key", apiModel: "stored-model" },
+    { apiBase: "https://bundled.example/v1", apiKey: "bundled-key", model: "bundled-model" }
   );
-  assert.equal(hostBridge.isNativeHostMissingError("other"), false);
+  assert.equal(config.apiBase, "https://request.example/v1");
+  assert.equal(config.apiKey, "request-key");
+  assert.equal(config.model, "stored-model");
 });
 
-test("formatNativeHostError gives an actionable Chinese installer hint", () => {
-  const message = hostBridge.formatNativeHostError(
-    "Error: Specified native messaging host not found."
+test("direct API messages include debug context and images", () => {
+  const messages = apiClient.buildChatMessages(
+    {
+      title: "Example",
+      url: "https://example.test",
+      mentions: [{ kind: "debug", text: "Network (1): GET /api" }],
+      images: [{ dataUrl: "data:image/png;base64,eA==" }],
+    },
+    "分析页面",
+    [{ role: "assistant", text: "上一轮" }]
   );
-  assert.match(message, /仅复制 extension 文件夹不能运行/);
-  assert.match(message, /install-host/);
-  assert.equal(hostBridge.formatNativeHostError("upstream failed"), "upstream failed");
+  assert.match(messages[0].content, /Network \(1\)/);
+  assert.equal(messages[1].content, "上一轮");
+  assert.equal(messages[2].content[1].type, "image_url");
 });
 
-test("UI and background force tool-free mode", async () => {
+test("OpenAI SSE parser reads reasoning and answer deltas", () => {
+  assert.deepEqual(
+    apiClient.parseOpenAIStreamLine('data: {"choices":[{"delta":{"reasoning_content":"想","content":"答"}}]}'),
+    { thinking: "想", text: "答", done: false }
+  );
+  assert.equal(apiClient.parseOpenAIStreamLine("data: [DONE]").done, true);
+});
+
+test("UI and background use the browser-only direct API path", async () => {
   const fs = await import("node:fs");
   const sp = fs.readFileSync(path.join(__dirname, "..", "sidepanel.js"), "utf8");
   assert.equal(sp.includes('type: "browser-action"'), false);
@@ -259,15 +260,15 @@ test("UI and background force tool-free mode", async () => {
   assert.equal(sp.includes('$("browser-control")'), false);
   assert.ok(sp.includes('reasoningEffort: "high"'));
   assert.ok(sp.includes('type: "transcribe-audio"'));
-  assert.ok(sp.includes('type: "extract-pdf"'));
+  assert.ok(sp.includes('import("./vendor/pdf.mjs")'));
+  assert.ok(sp.includes('type: "assistant-send"'));
   const bg = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
-  assert.ok(bg.includes('msg.op === "browser_action"'));
-  assert.ok(bg.includes('op: "browser_result"'));
-  assert.ok(bg.includes("model tools are disabled"));
-  assert.ok(bg.includes("browserControl: false"));
-  assert.ok(bg.includes("normalizeHostPingResult"));
-  // timeout must not resolve ok:true
-  assert.equal(bg.includes('ok: true,\n          note: "ping sent'), false);
+  assert.ok(bg.includes("streamChat({"));
+  assert.ok(bg.includes('type: "assistant-event"'));
+  assert.equal(bg.includes("connectNative"), false);
+  assert.equal(bg.includes("nativeMessaging"), false);
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json"), "utf8"));
+  assert.equal(manifest.permissions.includes("nativeMessaging"), false);
 });
 
 test("sidepanel exposes keyboard and streaming interaction affordances", () => {

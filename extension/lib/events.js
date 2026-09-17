@@ -1,6 +1,6 @@
 /**
- * 将 host StreamEvent 映射为 UI 渲染指令（纯函数，便于单测）。
- * 默认隐藏调试噪音（host.argv / stderr / done）以及旧会话中的工具记录。
+ * 将流式事件映射为 UI 渲染指令（纯函数，便于单测）。
+ * 默认隐藏调试噪音以及旧会话中的工具记录。
  */
 
 /**
@@ -8,7 +8,7 @@
  * @typedef {{ kind: 'thinking'|'assistant'|'error'|'session'|'meta'|'hidden', text: string, label?: string, streaming?: boolean, sessionId?: string }} UICommand
  */
 
-const HIDDEN_PARTIAL = new Set(["host.argv", "stderr", "host.dry_run", "host.process_exit", "host.cancelled"]);
+const HIDDEN_PARTIAL = new Set(["stderr", "process_exit", "cancelled"]);
 
 /**
  * 清理工具输出：去掉控制字符/疑似二进制，截断长度。
@@ -58,7 +58,7 @@ export function isNoiseToolResult(text) {
  * @param {StreamEvent} event
  * @returns {UICommand[]}
  */
-export function mapHostEventToUI(event) {
+export function mapAssistantEventToUI(event) {
   if (!event || !event.type) return [];
   switch (event.type) {
     case "thinking":
@@ -66,7 +66,7 @@ export function mapHostEventToUI(event) {
     case "text":
       return [{ kind: "assistant", text: event.text || "", streaming: false }];
     case "partial":
-      if (HIDDEN_PARTIAL.has(event.rawType || "") || event.rawType === "host.argv") {
+      if (HIDDEN_PARTIAL.has(event.rawType || "")) {
         return [{ kind: "hidden", text: event.text || "", label: event.rawType || "partial" }];
       }
       return [{ kind: "assistant", text: event.text || "", streaming: true }];

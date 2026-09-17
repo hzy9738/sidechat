@@ -1,65 +1,72 @@
 # 安能助手
 
-通用型 Chrome MV3 侧栏助手 + **Rust Native Messaging Host**。默认接入公司私有化 OpenAI 兼容接口，文本模型 `deepseek-v4`，识图与 OCR 走 `qwen-vl`。
+安能助手是一个纯 Chrome MV3 扩展。加载已解压的扩展后即可使用，不需要 Native Messaging Host、系统安装器、注册表或本地守护进程。
 
-Chrome 扩展本身必须是 JS；关键密钥和接口配置封在 Rust Host 的加密资源里，不写进扩展源码。
+## 工作方式
 
 ```text
-划词 / 右键选图 / 侧栏
-        │  native messaging
+侧栏 / 页面内小卡片
+        │
         ▼
-sidechat-host（Rust）
-        │  读取接口配置（环境变量 / anneng-config.json）
-        ▼
-POST https://ai-model.chint.com/api/chat/completions
+Chrome 扩展 Service Worker
+        ├─ 直接调用 OpenAI 兼容接口
+        ├─ 在 chrome.storage.local 保存会话
+        ├─ 通过 chrome.debugger 采集并脱敏 Network / Console
+        └─ 在扩展内使用 PDF.js 提取 PDF 文字
 ```
 
-## 能力
+当用户直接问“这个页面有哪些接口”“看一下 Network / Console”等问题时，扩展会自动申请并使用已有的 `debugger` 权限完成一次采集；不需要输入 `@`，也没有“开始采集”前置步骤。
 
-- 侧栏对话，附带当前页 / 选区 / 标签
-- 划词浮层「问安能助手」
-- 右键：选中文字、图片、链接、整页
-- 选图自动改走视觉模型
-- 麦克风录音转文字（OpenAI 兼容 `/audio/transcriptions`）
-- 图片 OCR 与 PDF 文本提取
-- 按需采集当前页的 Network / Console 调试快照（显式授权、脱敏、限量）
-- 回复朗读（浏览器系统语音）
-- 思考模式（`thinking: enabled`）
-- 本机会话 `~/.sidechat/sessions/`
+## 加载即用的分发包
+
+构建机可把本地 `.secrets/runtime-config.json` 注入扩展包：
+
+```bash
+cd extension
+npm ci
+cd ..
+./packaging/build-unpacked-extension.sh
+```
+
+然后把 `dist/Anneng-Assistant-<version>-unpacked.zip` 发给用户。用户解压后：
+
+1. 打开 `chrome://extensions`
+2. 开启“开发者模式”
+3. 点击“加载已解压的扩展程序”
+4. 选择解压目录中的 `extension` 文件夹
+
+无需运行任何 `.cmd`、`.ps1`、`.exe` 或 macOS 安装器。
+
+## 本地开发
+
+```bash
+cd extension
+npm install
+npm test
+```
+
+之后可直接加载仓库中的 `extension/`。源码里的 `runtime-config.json` 不含密钥，因此开发模式需要在侧栏设置中填写 API 地址和 Key，或者使用上面的构建脚本生成已注入配置的分发目录。
+
+## 配置格式
+
+构建脚本默认读取已被 Git 忽略的 `.secrets/runtime-config.json`：
+
+```json
+{
+  "apiBase": "https://example.internal/v1",
+  "apiKey": "replace-me",
+  "model": "deepseek-v4",
+  "visionModel": "qwen-vl"
+}
+```
+
+纯扩展模式无法向本机用户隐藏共享密钥：用户可以查看扩展文件或调试 Service Worker。请在网关侧配合额度限制、异常告警、密钥轮换和必要的 IP 限制。不要把真实密钥提交到 Git。
 
 ## 目录
 
-| 路径 | 说明 |
-|---|---|
-| `extension/` | MV3 扩展（侧栏、右键、划词） |
-| `host-rs/` | Rust Host（Native Messaging） |
-| `host/` | 旧 Go Host（不再安装） |
-| `scripts/install-native-host.sh` | 编译 Rust 并注册 Native Messaging |
-
-## 安装
-
-```bash
-cd host-rs && cargo test && cargo build --release --bin sidechat-host
-cd .. && ./scripts/install-native-host.sh
-node extension/test/run-tests.mjs
-```
-
-Chrome 加载解压扩展：`extension/`。商店正式 ID：`hkifhagmdbdpaihdmllddcingebfpjmm`（安装器、策略与 Native Host 白名单使用）；本地开发加载已解压扩展时由 manifest `key` 固定为 `gjpmflfaadhcbbcckbmbccggfpbdjdel`。
-
-把开发版交给另一台电脑时不能只复制 `extension/`，否则目标电脑没有系统级 Native Messaging Host。Windows 可使用 [packaging/README.md](packaging/README.md) 的 portable 包；macOS 必须使用已签名并公证的 `.pkg`。
-
-### 读取 Network / Console
-
-打开目标网页和安能助手侧栏，直接问“有哪些接口”“哪些请求失败了”或“分析控制台报错”。扩展会识别调试意图，自动挂载调试器；若当前还没有请求记录，会自动刷新当前页，等待请求稳定后把 Network / Console 快照交给模型，随后立即停止采集。无需点击 `＠` 或任何调试开关。
-
-调试权限作为扩展必需权限声明。快照不记录 Cookie、Authorization 等请求头；URL、请求体和 JSON 响应中疑似凭据的字段会脱敏，单条内容和总条目数均有限制。超大响应、二进制响应不会附加。若 Chrome DevTools 正占用该标签页的调试连接，请先关闭 DevTools 后重试问题。
-
-面向普通员工分发时，使用 [packaging/README.md](packaging/README.md) 中的 macOS `.pkg` 或 Windows `.exe`。管理员先将扩展上传到对应浏览器的扩展分发平台；之后安装器会列出本机已检测到的 Chrome、Edge、Brave、Chromium、ego lite，以及 Windows 上的 360、QQ 浏览器兼容选项，并注册 Host。终端用户不需要打开开发者模式。
-
-接口地址、密钥和模型来自侧栏设置、环境变量（`SIDECHAT_API_BASE` / `SIDECHAT_API_KEY` / `SIDECHAT_MODEL`，视觉模型 `SIDECHAT_VISION_MODEL`），或安装包随 Host 附带的 `anneng-config.json`（打包时从本地 `.secrets/host-config.json` 注入，不进仓库，见 [packaging/README.md](packaging/README.md)）。优先级：请求 > 环境变量 > 随包配置。地址与凭据同源：自填地址时只使用自填凭据，不会把密钥发给其他网关。
-
-不要把明文密钥写进 README 或扩展代码。
-
-## 协议
-
-对话使用 `send` / `event` / `cancel` / `ping`；语音与 PDF 使用一次性 RPC `transcribe_audio` / `extract_pdf`。`browser.images` 为待识别图片（`src` / `dataUrl`）。
+- `extension/`：完整浏览器扩展
+- `extension/lib/api-client.js`：OpenAI 兼容接口与流式响应
+- `extension/lib/browser-sessions.js`：浏览器本地会话存储
+- `extension/vendor/`：随扩展分发的 PDF.js
+- `packaging/build-unpacked-extension.sh`：开发者模式分发包
+- `packaging/build-extension-zip.sh`：Chrome Web Store 上传包

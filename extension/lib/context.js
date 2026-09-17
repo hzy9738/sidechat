@@ -31,7 +31,7 @@ export function parseMentionTokens(text) {
 }
 
 /**
- * 根据 toggles / @tokens / 页面采集结果组装发往 host 的 browser 载荷。
+ * 根据 toggles / @tokens / 页面采集结果组装发往模型接口的 browser 载荷。
  * 不会把页面 URL 写成 cwd。
  * @param {object} opts
  * @param {BrowserContext} opts.page
